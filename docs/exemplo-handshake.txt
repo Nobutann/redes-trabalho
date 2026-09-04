@@ -1,0 +1,36 @@
+Exemplo de execucao do handshake (Checkpoint 1)
+--------------------------------------------------
+Comandos executados:
+  Servidor: python -u src/server.py
+  Cliente:  python src/client.py --mode batch --strategy gbn
+
+==================================================
+SAIDA DO SERVIDOR (src/server.py)
+==================================================
+[SERVER] Listening on 0.0.0.0:50000
+[SERVER] HELLO received from 127.0.0.1:60822
+         mode     : BATCH
+         strategy : GBN
+         max_text : 30
+[SERVER] HELLO_ACK sent (window=5)
+[SERVER] Handshake complete
+         client   : 127.0.0.1:60822
+         mode     : BATCH
+         strategy : GBN
+         max_text : 30
+         window   : 5
+
+==================================================
+SAIDA DO CLIENTE (src/client.py)
+==================================================
+[CLIENT] HELLO sent to 127.0.0.1:50000
+         mode     : BATCH
+         strategy : GBN
+         max_text : 30
+[CLIENT] HELLO_ACK received (window=5)
+[CLIENT] Handshake complete
+         server   : 127.0.0.1:50000
+         mode     : BATCH
+         strategy : GBN
+         max_text : 30
+         window   : 5
