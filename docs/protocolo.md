@@ -7,7 +7,8 @@
 
 | Decisão | Escolha | Justificativa |
 |---|---|---|
-| Transporte (socket) | ⚠️ UDP (recomendado) ou TCP | Em UDP, a confiabilidade é 100% responsabilidade do nosso protocolo — alinha com o objetivo do trabalho |
+| Transporte (socket) | **UDP** (`SOCK_DGRAM`) | Em UDP, a confiabilidade é 100% responsabilidade do nosso protocolo — alinha com o objetivo do trabalho |
+| Byte order | **big-endian** (network byte order) | Padrão da Internet; todos os campos multi-byte usam o prefixo `!` do módulo `struct` |
 | Modo de operação | individual vs. lote (negociado no handshake) | — |
 | Estratégia de confirmação | Go-Back-N vs. Repetição Seletiva (escolha do cliente) | — |
 | Tamanho do payload | 4 caracteres (fixo, exigência do trabalho) | — |
@@ -18,54 +19,103 @@
 
 ## 2. Formato dos pacotes
 
-> ⚠️ **Proposta inicial — sujeita a revisão.** Os cabeçalhos são concatenados ao
-> payload (máx. 4 caracteres) para formar o pacote final enviado via socket.
-
-### 2.1 Pacote de dados (cliente → servidor)
+### 2.1 Cabeçalho comum (presente em todos os pacotes)
 
 ```
- 0                   1                   2                   3
-+--------+----------+---------+-----------+----------------------+
-| MAGIC  | SEQ      | FLAGS   | CHECKSUM  | PAYLOAD (4 chars)    |
-| 1 byte | 1 byte   | 1 byte  | 2 bytes   | 4 bytes              |
-+--------+----------+---------+-----------+----------------------+
++--------+--------+
+| MAGIC  | TYPE   |
+| 1 byte | 1 byte |
++--------+--------+
 ```
 
-- **MAGIC:** byte fixo para validação rápida de pacote do nosso protocolo
-- **SEQ:** número de sequência do pacote (faixa: ⚠️ a definir, ex.: 0–255 com módulo)
-- **FLAGS:** bitmask de flags de controle (DATA / ACK / NAK / SYN / FIN / EOT)
-- **CHECKSUM:** cobre cabeçalho + payload (⚠️ algoritmo e cobertura a definir)
-- **PAYLOAD:** até 4 caracteres do conteúdo da aplicação
+| Campo | Tamanho | Valores |
+|---|---|---|
+| MAGIC | 1 byte | `0xAA` — identifica pacotes deste protocolo |
+| TYPE  | 1 byte | `0x01` HELLO · `0x02` HELLO_ACK · `0x03` READY |
 
-### 2.2 Pacote de confirmação (servidor → cliente)
+### 2.2 Pacotes de handshake (Checkpoint 1 — implementados)
 
-```
-+--------+----------+---------+-----------+----------------------+
-| MAGIC  | ACK#     | FLAGS   | CHECKSUM  | (reservado/vazio)    |
-+--------+----------+---------+-----------+----------------------+
-```
-
-- Semântica do ACK# em GBN (próximo esperado — ACK cumulativo) vs. SR
-  (ACK individual) — ⚠️ a detalhar por estratégia.
-
-## 3. Handshake (Checkpoint 1)
-
-Trocas mínimas exigidas: **modo de operação**, **tamanho máximo do texto inicial**
-e **tamanho da janela**.
-
-> ⚠️ Esboço a validar pelo grupo (exemplo com 2 vias):
+#### HELLO (cliente → servidor) — 7 bytes
 
 ```
-CLIENTE                              SERVIDOR
-   |  --- SYN { modo, max_texto } --->  |
-   |  <-- SYN-ACK { janela (1..5) } --  |   (janela definida pelo servidor, inicial 5)
-   |  --- ACK ----------------------->  |
-   |         (conexão estabelecida)     |
++--------+--------+--------+----------+----------+----------+
+| MAGIC  | TYPE   | MODE   | STRATEGY | MAX_TEXT | RESERVED |
+| 1 byte | 1 byte | 1 byte | 1 byte   | 2 bytes  | 1 byte   |
++--------+--------+--------+----------+----------+----------+
+  0xAA    0x01
 ```
 
-- O **cliente** informa o modo de operação (individual/lote; GBN/SR) e o tamanho
-  máximo do texto (≥ 30, default 30).
-- O **servidor** responde com o tamanho da janela de recepção (1–5, inicial 5).
+| Campo | Tamanho | Valores |
+|---|---|---|
+| MODE     | 1 byte  | `0` = individual · `1` = lote |
+| STRATEGY | 1 byte  | `0` = Go-Back-N · `1` = Repetição Seletiva (ignorado se MODE = individual, mas sempre presente) |
+| MAX_TEXT | 2 bytes (unsigned short, big-endian) | Comprimento máximo total do texto (mínimo 30) |
+| RESERVED | 1 byte  | `0x00` (reservado para uso futuro) |
+
+#### HELLO_ACK (servidor → cliente) — 3 bytes
+
+```
++--------+--------+--------+
+| MAGIC  | TYPE   | WINDOW |
+| 1 byte | 1 byte | 1 byte |
++--------+--------+--------+
+  0xAA    0x02
+```
+
+| Campo | Tamanho | Valores |
+|---|---|---|
+| WINDOW | 1 byte | Tamanho da janela escolhido pelo servidor (1–5) |
+
+#### READY (cliente → servidor) — 2 bytes
+
+```
++--------+--------+
+| MAGIC  | TYPE   |
+| 1 byte | 1 byte |
++--------+--------+
+  0xAA    0x03
+```
+
+Sem corpo — confirma que o handshake foi concluído pelo lado do cliente.
+
+### 2.3 Pacotes de dados (Checkpoint 2 — pendente)
+
+> ⚠️ Formato a definir. Esboço inicial:
+
+```
++--------+--------+---------+-----------+--------------------+
+| MAGIC  | SEQ    | FLAGS   | CHECKSUM  | PAYLOAD (4 chars)  |
+| 1 byte | 1 byte | 1 byte  | 2 bytes   | 4 bytes            |
++--------+--------+---------+-----------+--------------------+
+```
+
+- **SEQ:** número de sequência (faixa: ⚠️ a definir)
+- **FLAGS:** bitmask de controle (DATA / ACK / NAK / FIN / EOT — ⚠️ a definir)
+- **CHECKSUM:** cobre cabeçalho + payload (⚠️ algoritmo a definir)
+
+### 2.4 Pacote de confirmação (Checkpoint 2 — pendente)
+
+> ⚠️ Formato a definir. Semântica do ACK# difere entre GBN (cumulativo) e SR
+> (individual) — a detalhar por estratégia.
+
+## 3. Handshake (Checkpoint 1 — implementado)
+
+Trocas realizadas na conexão: **modo de operação**, **tamanho máximo do texto** e
+**tamanho da janela**.
+
+```
+CLIENTE                                SERVIDOR
+   |  --- HELLO { mode, strategy,  -->  |
+   |             max_text }             |
+   |  <-- HELLO_ACK { window } ------   |   (window ∈ [1, 5], definido pelo servidor)
+   |  --- READY ----------------------> |
+   |          (handshake concluído)     |
+```
+
+- O **cliente** envia HELLO informando o modo de operação, a estratégia de
+  confirmação e o comprimento máximo do texto (≥ 30, padrão 30).
+- O **servidor** responde com HELLO_ACK informando o tamanho da janela (1–5).
+- O **cliente** confirma com READY, encerrando o handshake.
 
 ## 4. Fluxo de transferência (Checkpoint 2 — caminho sem erros)
 
@@ -102,6 +152,24 @@ CLIENTE                              SERVIDOR
 
 ## 7. Mensagens de exemplo
 
-> ⚠️ Exemplos concretos (payloads, bytes, prints esperados) serão adicionados
-> conforme o formato for fixado — úteis para o manual de uso e para os testes
-> da apresentação.
+### 7.1 Handshake completo (Checkpoint 1)
+
+Exemplo com modo lote, Repetição Seletiva e `max_text = 100`:
+
+| Mensagem   | Bytes (hex)           | Tamanho |
+|---|---|---|
+| HELLO      | `AA 01 01 01 00 64 00` | 7 bytes |
+| HELLO_ACK  | `AA 02 05`             | 3 bytes |
+| READY      | `AA 03`                | 2 bytes |
+
+Decodificação do HELLO (`AA 01 01 01 00 64 00`):
+- `AA` → MAGIC
+- `01` → TYPE = HELLO
+- `01` → MODE = BATCH
+- `01` → STRATEGY = SR
+- `00 64` → MAX_TEXT = 100 (big-endian)
+- `00` → RESERVED
+
+### 7.2 Pacotes de dados (Checkpoint 2)
+
+> ⚠️ Exemplos serão adicionados quando o formato de dados for fixado.

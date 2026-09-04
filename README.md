@@ -6,9 +6,9 @@ próprio, construído sobre sockets. O cliente envia textos que são fragmentado
 pacotes de até 4 caracteres de payload, com cabeçalhos próprios (checksum, flags,
 número de sequência), e o servidor os recompõe e confirma a recepção.
 
-**Status:** 🚧 não iniciado — em fase de planejamento.
+**Status:** 🔨 em desenvolvimento — Checkpoint 1 (handshake) em andamento.
 
-**Linguagem planejada:** Python (decisão revisável).
+**Linguagem:** Python 3.
 
 ## Documentação
 
@@ -19,26 +19,56 @@ número de sequência), e o servidor os recompõe e confirma a recepção.
 
 ## Roadmap
 
-| Marco | Data | Escopo |
-|---|---|---|
-| Milestone 1 — Handshake & Sockets | 09/09/2026 | Conexão via socket e handshake inicial (modo de operação, tamanho máximo do texto, tamanho da janela) |
-| Milestone 2 — Protocolo sem erros | 21/10/2026 | Transferência completa funcionando em canal sem perdas/erros |
-| Milestone 3 — Erros e perdas | 23/11/2026 | Simulação determinística de erros/perdas, retransmissão, GBN e Repetição Seletiva |
+| Marco | Data | Status | Escopo |
+|---|---|---|---|
+| Milestone 1 — Handshake & Sockets | 09/09/2026 | 🔨 em andamento | Conexão via socket e handshake inicial (modo de operação, tamanho máximo do texto, tamanho da janela) |
+| Milestone 2 — Protocolo sem erros | 21/10/2026 | ⏳ pendente | Transferência completa funcionando em canal sem perdas/erros |
+| Milestone 3 — Erros e perdas | 23/11/2026 | ⏳ pendente | Simulação determinística de erros/perdas, retransmissão, GBN e Repetição Seletiva |
 
-## Estrutura (planejada)
+## Estrutura
 
 ```
 redes-trabalho/
 ├── README.md
 ├── docs/
 │   ├── requisitos.md
-│   └── protocolo.md
+│   ├── protocolo.md
+│   └── ia-log.md
 └── src/
-    ├── client.py
-    ├── server.py
-    └── protocol.py
+    ├── protocol.py   ✅ implementado (CP1)
+    ├── client.py     ⏳ pendente
+    └── server.py     ⏳ pendente
 ```
 
 ## Como executar
 
-> Será preenchido quando houver a primeira versão executável (Milestone 1).
+### Verificar o módulo de protocolo (`protocol.py`)
+
+O módulo pode ser exercitado de forma autônoma — sem necessidade de servidor
+ou cliente em execução — de duas maneiras:
+
+**1. Bloco `__main__` (testes de ida e volta + validações):**
+
+```bash
+python src/protocol.py
+```
+
+Saída esperada: seis verificações passando, incluindo três round-trips
+(HELLO, HELLO_ACK, READY) e três casos de erro validados.
+
+**2. Importação interativa no REPL do Python:**
+
+```python
+from src.protocol import build_hello, build_hello_ack, build_ready, parse_packet
+from src.protocol import Mode, Strategy
+
+# Construir e inspecionar um pacote HELLO
+raw = build_hello(Mode.BATCH, Strategy.SR, max_text=50)
+print(raw.hex(" ").upper())   # AA 01 01 01 00 32 00
+
+# Parsear de volta
+print(parse_packet(raw))
+```
+
+> `client.py` e `server.py` serão documentados aqui quando implementados
+> (Milestone 1).
