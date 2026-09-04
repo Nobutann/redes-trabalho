@@ -1,4 +1,4 @@
-﻿# Diário de Uso de IA — Trabalho I
+# Diário de Uso de IA — Trabalho I
 
 Registro das interações com assistentes de IA durante o desenvolvimento do
 trabalho. Cada entrada descreve o que foi pedido, as decisões tomadas e os
@@ -76,3 +76,33 @@ CPs futuros.
 - A seção "Como executar" do README usa `from src.protocol import …` — funciona
   quando o REPL é iniciado na raiz do repositório; ajustar se a estrutura de
   pacotes mudar.
+
+---
+
+## Entrada 3 — Implementação de `server.py`, `client.py`, testes fim a fim e documentação do CP1
+
+**Data:** 2026-09-04
+
+### O que foi pedido
+
+1. Implementação do servidor UDP (`src/server.py`) e do cliente UDP (`src/client.py`) para completar a troca do handshake de 3 vias (HELLO, HELLO_ACK, READY) do Checkpoint 1, consumindo `src/protocol.py`.
+2. Execução de testes fim a fim cobrindo os modos de operação (`individual`, `batch` com GBN e SR) e persistência da saída real em `docs/exemplo-handshake.txt`.
+3. Atualização da documentação do repositório (`README.md`, `docs/protocolo.md` e este log) para refletir a conclusão do Checkpoint 1, incluindo guia passo a passo de execução (runbook), descrição exata dos argumentos de linha de comando (`argparse`) e seção de troubleshooting.
+
+### O que foi gerado
+
+- **`src/server.py`:** servidor UDP com socket vinculado a `0.0.0.0:50000`, laço iterativo de atendimento, validação de integridade dos pacotes com descarte defensivo e avisos no console, controle de endereço de origem durante o aguardo de `READY` e confirmação dos parâmetros acordados.
+- **`src/client.py`:** cliente UDP com interface de linha de comando (`--host`, `--port`, `--mode`, `--strategy`, `--max-text`), validação prévia de `--max-text >= 30`, temporizador de 5,0 segundos para recepção de respostas e finalização defensiva com código de erro 1 em caso de timeout ou respostas inválidas.
+- **`docs/exemplo-handshake.txt`:** captura de saída real de uma execução simultânea de servidor e cliente em modo lote com Go-Back-N.
+- **`README.md`:** status atualizado para CP1 concluído, roadmap e árvore de arquivos atualizados, manual de uso detalhado com sintaxe e flags reais de `argparse`, comandos prontos para cada modo e tabela de diagnóstico de erros/troubleshooting.
+- **`docs/protocolo.md`:** formalização dos parâmetros operacionais de rede (porta UDP 50000, buffer de 1024B, timeout de 5s), detalhamento do fluxo de handshake de 3 vias e remoção de marcações de decisão pendente para itens já implementados.
+
+### Decisões e pontos que o grupo deve revisar
+
+| Decisão | Detalhe | Impacto |
+|---|---|---|
+| Modelo iterativo no servidor | O servidor CP1 atende um handshake e retorna ao laço principal | Suficiente para o CP1; no CP2/CP3, definir como o servidor gerenciará o estado da transferência e múltiplas sessões |
+| Janela fixa no servidor | `_WINDOW = 5` fixada no código do servidor | Atende ao requisito do CP1; a variação/adaptação dinâmica da janela de 1 a 5 será definida em checkpoints futuros |
+| Timeout do cliente | Fixado em 5,0 segundos (`sock.settimeout(5.0)`) | Cobriu com folga os testes locais; avaliar necessidade de parametrização via CLI nos próximos marcos |
+| Validação antecipada de `max_text` | O cliente encerra com código 1 antes de tocar a rede se `--max-text < 30` | Evita tráfego inútil na rede e garante conformidade estrita com o requisito RF3 |
+
