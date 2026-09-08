@@ -26,8 +26,7 @@ redes-trabalho/
 ├── docs/
 │   ├── requisitos.md          # Especificação de requisitos do trabalho
 │   ├── protocolo.md           # Formato dos pacotes e fluxo de comunicação
-│   ├── exemplo-handshake.txt  # Exemplo de saída do handshake
-│   └── ia-log.md              # Diário de uso de ferramentas de IA
+│   └── exemplo-handshake.txt  # Exemplo de saída do handshake
 └── src/
     ├── protocol.py            # Constantes, tipos e empacotamento com struct
     ├── server.py              # Servidor UDP e loop de handshake
