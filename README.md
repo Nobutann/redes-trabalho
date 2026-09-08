@@ -1,6 +1,6 @@
 # Trabalho I — Transporte Confiável na Camada de Aplicação
 
-Implementação de um protocolo de transporte confiável sobre UDP na camada de aplicação, desenvolvido para a disciplina de Redes de Computadores.
+Implementação de um protocolo de transporte confiável sobre UDP na camada de aplicação, desenvolvido para a disciplina de Infraestrutura de Comunicação.
 
 O sistema fragmenta textos em mensagens com payload de até 4 bytes, adiciona cabeçalhos próprios (número de sequência, flags, checksum) e implementa confirmações e retransmissões (Go-Back-N e Repetição Seletiva).
 
