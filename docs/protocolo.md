@@ -8,7 +8,7 @@
 |---|---|---|
 | Transporte | UDP (`SOCK_DGRAM`) | Confiabilidade implementada na camada de aplicação |
 | Porta padrão | 50000 | Configurável via `--port` |
-| Byte order | Big-endian (`!`) | Padrão de rede do módulo `struct` |
+| Byte order | Big-endian | Padrão de rede (network byte order) |
 | Modo de operação | `0` (Individual), `1` (Batch) | Definido no campo `MODE` do `HELLO` |
 | Estratégia de retransmissão | `0` (Go-Back-N), `1` (Repetição Seletiva) | Definido no campo `STRATEGY` do `HELLO` |
 | Payload máximo | 4 caracteres | Aplicado nos pacotes de dados (CP2/CP3) |
@@ -48,14 +48,14 @@ Presente em todos os pacotes:
 +--------+--------+--------+----------+----------+----------+
 ```
 
-| Campo | Tamanho | Formato struct | Descrição |
+| Campo | Tamanho | Codificação | Descrição |
 |---|---|---|---|
-| MAGIC | 1 byte | `!B` | `0xAA` |
-| TYPE | 1 byte | `!B` | `0x01` |
-| MODE | 1 byte | `!B` | `0` = Individual, `1` = Batch |
-| STRATEGY | 1 byte | `!B` | `0` = Go-Back-N, `1` = Repetição Seletiva |
-| MAX_TEXT | 2 bytes | `!H` | Tamanho máximo da mensagem (mínimo 30) |
-| RESERVED | 1 byte | `!B` | `0x00` (reservado) |
+| MAGIC | 1 byte | unsigned int | `0xAA` |
+| TYPE | 1 byte | unsigned int | `0x01` |
+| MODE | 1 byte | unsigned int | `0` = Individual, `1` = Batch |
+| STRATEGY | 1 byte | unsigned int | `0` = Go-Back-N, `1` = Repetição Seletiva |
+| MAX_TEXT | 2 bytes | unsigned int, big-endian | Tamanho máximo da mensagem (mínimo 30) |
+| RESERVED | 1 byte | unsigned int | `0x00` (reservado) |
 
 #### HELLO_ACK (Servidor -> Cliente) — 3 bytes
 
@@ -66,11 +66,11 @@ Presente em todos os pacotes:
 +--------+--------+--------+
 ```
 
-| Campo | Tamanho | Formato struct | Descrição |
+| Campo | Tamanho | Codificação | Descrição |
 |---|---|---|---|
-| MAGIC | 1 byte | `!B` | `0xAA` |
-| TYPE | 1 byte | `!B` | `0x02` |
-| WINDOW | 1 byte | `!B` | Tamanho da janela (1 a 5; fixo em 5 no CP1) |
+| MAGIC | 1 byte | unsigned int | `0xAA` |
+| TYPE | 1 byte | unsigned int | `0x02` |
+| WINDOW | 1 byte | unsigned int | Tamanho da janela (1 a 5; fixo em 5 no CP1) |
 
 #### READY (Cliente -> Servidor) — 2 bytes
 
