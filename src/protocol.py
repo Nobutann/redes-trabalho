@@ -1,6 +1,5 @@
 """Definições e parsing dos pacotes de handshake do protocolo."""
 
-import struct
 from enum import IntEnum
 
 MAGIC = 0xAA
@@ -27,13 +26,9 @@ class InvalidPacketError(ValueError):
     """Lançada quando o byte MAGIC não confere."""
 
 
-FMT_HEADER = "!BB"
-FMT_HELLO_BODY = "!BBHB"
-FMT_HELLO_ACK_BODY = "!B"
-
-HEADER_SIZE = struct.calcsize(FMT_HEADER)
-HELLO_BODY_SIZE = struct.calcsize(FMT_HELLO_BODY)
-HELLO_ACK_BODY_SIZE = struct.calcsize(FMT_HELLO_ACK_BODY)
+HEADER_SIZE = 2
+HELLO_BODY_SIZE = 5
+HELLO_ACK_BODY_SIZE = 1
 
 
 def build_hello(mode: Mode, strategy: Strategy, max_text: int) -> bytes:
@@ -41,8 +36,8 @@ def build_hello(mode: Mode, strategy: Strategy, max_text: int) -> bytes:
     if max_text < 30:
         raise ValueError(f"max_text deve ser >= 30 (recebido {max_text})")
 
-    header = struct.pack(FMT_HEADER, MAGIC, PacketType.HELLO)
-    body = struct.pack(FMT_HELLO_BODY, int(mode), int(strategy), max_text, 0x00)
+    header = bytes([MAGIC, PacketType.HELLO])
+    body = bytes([int(mode), int(strategy)]) + max_text.to_bytes(2, byteorder="big") + bytes([0x00])
     return header + body
 
 
@@ -51,14 +46,14 @@ def build_hello_ack(window: int) -> bytes:
     if not (1 <= window <= 5):
         raise ValueError(f"window deve estar entre 1 e 5 (recebido {window})")
 
-    header = struct.pack(FMT_HEADER, MAGIC, PacketType.HELLO_ACK)
-    body = struct.pack(FMT_HELLO_ACK_BODY, window)
+    header = bytes([MAGIC, PacketType.HELLO_ACK])
+    body = bytes([window])
     return header + body
 
 
 def build_ready() -> bytes:
     """Monta o pacote READY (2 bytes)."""
-    return struct.pack(FMT_HEADER, MAGIC, PacketType.READY)
+    return bytes([MAGIC, PacketType.READY])
 
 
 def parse_packet(data: bytes) -> dict:
@@ -66,7 +61,8 @@ def parse_packet(data: bytes) -> dict:
     if len(data) < HEADER_SIZE:
         raise ValueError(f"Pacote muito curto: esperado pelo menos {HEADER_SIZE} bytes, recebido {len(data)}")
 
-    magic, raw_type = struct.unpack_from(FMT_HEADER, data, offset=0)
+    magic = data[0]
+    raw_type = data[1]
 
     if magic != MAGIC:
         raise InvalidPacketError(f"MAGIC inválido: esperado 0x{MAGIC:02X}, recebido 0x{magic:02X}")
@@ -82,9 +78,10 @@ def parse_packet(data: bytes) -> dict:
         min_size = HEADER_SIZE + HELLO_BODY_SIZE
         if len(data) < min_size:
             raise ValueError(f"Pacote HELLO muito curto: esperado {min_size} bytes, recebido {len(data)}")
-        mode_raw, strategy_raw, max_text, reserved = struct.unpack_from(
-            FMT_HELLO_BODY, data, offset=offset
-        )
+        mode_raw = data[offset]
+        strategy_raw = data[offset + 1]
+        max_text = int.from_bytes(data[offset + 2 : offset + 4], byteorder="big")
+        reserved = data[offset + 4]
         if max_text < 30:
             raise ValueError(f"max_text deve ser >= 30 (recebido {max_text})")
         return {
@@ -99,7 +96,7 @@ def parse_packet(data: bytes) -> dict:
         min_size = HEADER_SIZE + HELLO_ACK_BODY_SIZE
         if len(data) < min_size:
             raise ValueError(f"Pacote HELLO_ACK muito curto: esperado {min_size} bytes, recebido {len(data)}")
-        (window,) = struct.unpack_from(FMT_HELLO_ACK_BODY, data, offset=offset)
+        window = data[offset]
         if not (1 <= window <= 5):
             raise ValueError(f"window deve estar entre 1 e 5 (recebido {window})")
         return {
