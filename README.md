@@ -2,9 +2,11 @@
 
 Este projeto faz parte da disciplina de Infraestrutura de Comunicação. O objetivo é construir uma aplicação cliente-servidor que use UDP e implemente suas próprias regras de transporte confiável.
 
-Ao longo do trabalho, a aplicação passará a dividir textos em fragmentos de até quatro caracteres, acrescentar cabeçalhos com número de sequência, flags e checksum, e controlar confirmações e retransmissões com Go-Back-N e Repetição Seletiva.
+Ao longo do trabalho, a aplicação passará a dividir textos em fragmentos de até quatro caracteres, acrescentar cabeçalhos com número de sequência, indicador de último fragmento e checksum, e controlar confirmações e retransmissões com Go-Back-N e Repetição Seletiva.
 
 **Estado atual:** Checkpoint 1 concluído. Cliente e servidor já realizam o handshake de três vias e trocam os parâmetros da comunicação. O envio do texto ainda será implementado no Checkpoint 2.
+
+Os formatos de `DATA` e `ACK` e o fluxo de transferência sem erros estão especificados em [`docs/protocolo.md`](docs/protocolo.md), mas ainda não foram implementados. Essa definição parcial não conclui o CP2.
 
 ---
 
@@ -76,7 +78,7 @@ Parâmetros disponíveis em `client.py`:
 - `--port`: Porta UDP do servidor (padrão: `50000`)
 - `--mode`: Modo de transferência — `individual` ou `batch` (padrão: `individual`)
 - `--strategy`: Estratégia de retransmissão — `gbn` ou `sr` (padrão: `gbn`)
-- `--max-text`: Limite máximo previsto para o texto, em caracteres. O valor configurado deve ser pelo menos 30 (padrão: `30`). Isso não obriga cada mensagem a ter 30 caracteres.
+- `--max-text`: Limite máximo previsto para o texto, em caracteres, de 30 a 65.535 (padrão: `30`). Isso não obriga cada mensagem a ter 30 caracteres.
 
 Se mudar a porta do servidor, informe a mesma porta ao cliente com `--port`. Para acessar um servidor em outra máquina, use `--host` seguido do IP correspondente.
 
