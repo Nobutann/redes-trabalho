@@ -1,24 +1,24 @@
 # Trabalho I — Transporte Confiável na Camada de Aplicação
 
-Implementação de um protocolo de transporte confiável sobre UDP na camada de aplicação, desenvolvido para a disciplina de Infraestrutura de Comunicação.
+Este projeto faz parte da disciplina de Infraestrutura de Comunicação. O objetivo é construir uma aplicação cliente-servidor que use UDP e implemente suas próprias regras de transporte confiável.
 
-O sistema fragmenta textos em mensagens com payload de até 4 bytes, adiciona cabeçalhos próprios (número de sequência, flags, checksum) e implementa confirmações e retransmissões (Go-Back-N e Repetição Seletiva).
+Ao longo do trabalho, a aplicação passará a dividir textos em fragmentos de até quatro caracteres, acrescentar cabeçalhos com número de sequência, flags e checksum, e controlar confirmações e retransmissões com Go-Back-N e Repetição Seletiva.
 
-**Status:** Checkpoint 1 concluído (Handshake UDP de 3 vias).
+**Estado atual:** Checkpoint 1 concluído. Cliente e servidor já realizam o handshake de três vias e trocam os parâmetros da comunicação. O envio do texto ainda será implementado no Checkpoint 2.
 
 ---
 
-## Roadmap
+## Etapas do trabalho
 
 | Marco | Data | Status | Escopo |
 |---|---|---|---|
 | Checkpoint 1 — Handshake & Sockets | 09/09/2026 | Concluído | Conexão UDP e handshake de 3 vias (modo, estratégia, tamanho máximo e janela) |
-| Checkpoint 2 — Protocolo sem erros | 21/10/2026 | Pendente | Transferência completa de dados em canal sem perdas |
-| Checkpoint 3 — Erros e perdas | 23/11/2026 | Pendente | Simulação determinística de falhas, temporizadores, Go-Back-N e Repetição Seletiva |
+| Checkpoint 2 — Protocolo sem erros | 21/10/2026 | Pendente | Definição completa do protocolo e transferência de dados sem erros ou perdas |
+| Checkpoint 3 — Erros e perdas | 23/11/2026 | Pendente | Simulação determinística de falhas e recuperação com temporizadores, Go-Back-N e Repetição Seletiva |
 
 ---
 
-## Estrutura do Projeto
+## Organização do projeto
 
 ```
 redes-trabalho/
@@ -28,34 +28,34 @@ redes-trabalho/
 │   ├── protocolo.md           # Formato dos pacotes e fluxo de comunicação
 │   └── exemplo-handshake.txt  # Exemplo de saída do handshake
 └── src/
-    ├── protocol.py            # Constantes, tipos e empacotamento com struct
+    ├── protocol.py            # Constantes, tipos, montagem e leitura dos pacotes
     ├── server.py              # Servidor UDP e loop de handshake
     └── client.py              # Cliente UDP e interface CLI
 ```
 
 ---
 
-## Como Executar
+## Como executar
 
-O projeto requer apenas Python 3 (versão 3.10 ou superior), sem dependências adicionais.
+Para executar o projeto, basta ter Python 3.10 ou superior. Não é preciso instalar dependências adicionais.
 
-### 1. Iniciar o Servidor
+### 1. Iniciar o servidor
 
-No primeiro terminal:
+Abra um terminal na pasta do projeto e inicie o servidor:
 
 ```bash
 python src/server.py
 ```
 
-Por padrão, o servidor aguarda conexões em `0.0.0.0:50000`. Para indicar outra porta:
+Por padrão, o servidor escuta em `0.0.0.0:50000`. Para usar outra porta:
 
 ```bash
 python src/server.py --port 50001
 ```
 
-### 2. Executar o Cliente
+### 2. Executar o cliente
 
-No segundo terminal, execute o cliente com os parâmetros desejados:
+Em outro terminal, também na pasta do projeto, execute o cliente com os parâmetros desejados:
 
 ```bash
 # Modo individual (padrão)
@@ -64,23 +64,27 @@ python src/client.py --mode individual
 # Modo lote com Go-Back-N
 python src/client.py --mode batch --strategy gbn
 
-# Modo lote com Repetição Seletiva e max_text customizado
+# Modo lote com Repetição Seletiva e limite de texto igual a 100
 python src/client.py --mode batch --strategy sr --max-text 100
 ```
 
-#### Parâmetros disponíveis (`client.py`):
+No CP1, esses comandos apenas negociam o modo e a estratégia. A transferência de dados ainda não acontece.
+
+Parâmetros disponíveis em `client.py`:
 
 - `--host`: IP do servidor (padrão: `127.0.0.1`)
 - `--port`: Porta UDP do servidor (padrão: `50000`)
 - `--mode`: Modo de transferência — `individual` ou `batch` (padrão: `individual`)
 - `--strategy`: Estratégia de retransmissão — `gbn` ou `sr` (padrão: `gbn`)
-- `--max-text`: Tamanho máximo do texto em bytes, mínimo 30 (padrão: `30`)
+- `--max-text`: Limite máximo previsto para o texto, em caracteres. O valor configurado deve ser pelo menos 30 (padrão: `30`). Isso não obriga cada mensagem a ter 30 caracteres.
+
+Se mudar a porta do servidor, informe a mesma porta ao cliente com `--port`. Para acessar um servidor em outra máquina, use `--host` seguido do IP correspondente.
 
 ---
 
-## Exemplo de Saída
+## Exemplo de execução
 
-Execução com `python src/client.py --mode batch --strategy gbn`:
+Ao executar `python src/client.py --mode batch --strategy gbn`, as duas pontas mostram as etapas do handshake e os parâmetros acordados:
 
 **Cliente:**
 ```
@@ -101,14 +105,16 @@ Execução com `python src/client.py --mode batch --strategy gbn`:
   modo: BATCH, estratégia: GBN, max_text: 30, window: 5
 ```
 
-Um log completo da execução das duas pontas está em [`docs/exemplo-handshake.txt`](docs/exemplo-handshake.txt).
+O registro completo dessa execução está em [`docs/exemplo-handshake.txt`](docs/exemplo-handshake.txt). As regras e os formatos dos pacotes estão em [`docs/protocolo.md`](docs/protocolo.md).
 
 ---
 
-## Testes do Protocolo
+## Verificação dos pacotes de handshake
 
-Para rodar os testes de integridade e decodificação de pacotes:
+Para executar as verificações de montagem e leitura de `HELLO`, `HELLO_ACK` e `READY`:
 
 ```bash
 python src/protocol.py
 ```
+
+Essas verificações cobrem os pacotes do CP1. O checksum e os testes de transferência serão acrescentados nas próximas etapas.
