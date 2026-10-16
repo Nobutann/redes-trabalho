@@ -1,4 +1,4 @@
-"""Definições e parsing dos pacotes de handshake do protocolo."""
+"""Definições do protocolo, checksum e parsing dos pacotes de handshake."""
 
 from enum import IntEnum
 
@@ -29,6 +29,24 @@ class InvalidPacketError(ValueError):
 HEADER_SIZE = 2
 HELLO_BODY_SIZE = 5
 HELLO_ACK_BODY_SIZE = 1
+
+
+def calculate_checksum(data: bytes) -> int:
+    total = 0
+    for offset in range(0, len(data), 2):
+        word = data[offset] << 8
+        if offset + 1 < len(data):
+            word |= data[offset + 1]
+        total += word
+
+    while total >> 16:
+        total = (total & 0xFFFF) + (total >> 16)
+
+    return (~total) & 0xFFFF
+
+
+def verify_checksum(data: bytes) -> bool:
+    return calculate_checksum(data) == 0x0000
 
 
 def build_hello(mode: Mode, strategy: Strategy, max_text: int) -> bytes:

@@ -209,7 +209,7 @@ Em GBN, o servidor só poderá confirmar `n` quando tiver recebido todos os frag
 
 ### 4.4 Checksum de DATA e ACK
 
-O checksum será implementado manualmente como uma soma de 16 bits em complemento de um, sem usar uma função pronta de checksum. Estas são as regras de cálculo, ainda não implementadas:
+O cálculo manual do checksum de 16 bits em complemento de um e sua verificação estão implementados em `src/protocol.py`, pelas funções `calculate_checksum(data)` e `verify_checksum(data)`, sem usar uma função pronta de checksum. Elas processam os bytes exatamente como recebidos, sem interpretar campos ou tipos de pacote. A montagem de `DATA` e `ACK` e a integração do checksum com esses pacotes ainda não estão implementadas. Os futuros construtores deverão zerar o campo `CHECKSUM` antes de chamar o cálculo, seguindo estas regras:
 
 1. Montar os bytes do pacote com os dois bytes de `CHECKSUM` zerados. Em `DATA`, o cálculo cobrirá `MAGIC`, `TYPE`, `SEQ`, `LAST`, `LEN`, o campo `CHECKSUM` zerado e todos os bytes do `PAYLOAD`. Em `ACK`, cobrirá os 6 bytes do pacote, também com `CHECKSUM` zerado. Cabeçalhos IP e UDP não entrarão nessa soma.
 2. Agrupar os bytes em palavras de 16 bits em big-endian. Se a quantidade de bytes for ímpar, acrescentar um byte zero à direita apenas para o cálculo. Esse preenchimento não será enviado e não entrará em `LEN`.
