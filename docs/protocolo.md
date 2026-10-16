@@ -1,6 +1,6 @@
 # Especificação do protocolo
 
-Este documento descreve o handshake implementado no CP1 e especifica os pacotes `DATA` e `ACK` e o fluxo de transferência sem erros ou perdas para o CP2. Essa parte do CP2 ainda não está implementada. A definição desses pacotes e desse fluxo não conclui a especificação completa nem a implementação do checkpoint.
+Este documento descreve o handshake implementado no CP1 e a montagem e leitura dos pacotes `DATA` e `ACK`, implementadas para o CP2 com checksum e validação dos campos. O fluxo de transferência sem erros ou perdas está especificado, mas ainda não foi implementado. O suporte aos pacotes não conclui a especificação completa nem a implementação do checkpoint.
 
 ## 1. Visão geral e parâmetros
 
@@ -13,7 +13,7 @@ A comunicação usa sockets UDP. No início de cada sessão, o cliente informa o
 | Ordem dos bytes | Big-endian | Usada nos campos com mais de um byte |
 | Modo de operação | `0` (Individual), `1` (Batch) | Definido no campo `MODE` do `HELLO` |
 | Estratégia de retransmissão | `0` (Go-Back-N), `1` (Repetição Seletiva) | Definido no campo `STRATEGY` do `HELLO` |
-| Payload máximo | 4 pontos de código Unicode, até 16 bytes em UTF-8 | Especificado para o CP2; ainda não implementado |
+| Payload máximo | 4 pontos de código Unicode, até 16 bytes em UTF-8 | Validado por pacote `DATA`; a fragmentação da mensagem ainda não está implementada |
 | Limite máximo do texto | Padrão 30 caracteres; configurável de 30 a 65.535 | Informado no campo `MAX_TEXT` de 2 bytes do `HELLO` |
 | Janela de recepção | 1 a 5; fixada em 5 no CP1 e nesta especificação do CP2 | Enviada pelo servidor no `HELLO_ACK` |
 | Buffer do socket | 1024 bytes | Constante `BUFSIZE` |
@@ -29,7 +29,7 @@ No CP1, apenas o valor desse limite é trocado no handshake. A ajuda de `--max-t
 
 ### 2.1 Cabeçalho comum
 
-Todos os pacotes começam com dois campos: `MAGIC`, que identifica o protocolo, e `TYPE`, que informa qual mensagem foi enviada. Esse cabeçalho é mantido nos formatos de `DATA` e `ACK` especificados para o CP2.
+Todos os pacotes começam com dois campos: `MAGIC`, que identifica o protocolo, e `TYPE`, que informa qual mensagem foi enviada. Esse cabeçalho é mantido nos formatos de `DATA` e `ACK` implementados para o CP2.
 
 ```
 +--------+--------+
@@ -46,8 +46,8 @@ Todos os pacotes começam com dois campos: `MAGIC`, que identifica o protocolo, 
 | `0x01` | `HELLO` | Implementado no CP1 |
 | `0x02` | `HELLO_ACK` | Implementado no CP1 |
 | `0x03` | `READY` | Implementado no CP1 |
-| `0x04` | `DATA` | Especificado para o CP2; ainda não implementado |
-| `0x05` | `ACK` | Especificado para o CP2; ainda não implementado |
+| `0x04` | `DATA` | Montagem e leitura com checksum implementadas; envio ainda não implementado |
+| `0x05` | `ACK` | Montagem e leitura com checksum implementadas; envio ainda não implementado |
 
 Todos os campos numéricos são inteiros sem sinal. Campos com mais de um byte usam big-endian, com o byte mais significativo primeiro.
 
@@ -142,9 +142,11 @@ Esses timeouts encerram a tentativa de handshake. Ainda não há retransmissão 
 
 ---
 
-## 4. DATA e ACK (especificados para o CP2; ainda não implementados)
+## 4. DATA e ACK (montagem e leitura implementadas)
 
-As regras desta seção e das seguintes definem o envio de uma mensagem de texto não vazia, sem erros ou perdas. Cada datagrama UDP transportará um pacote do protocolo. Os formatos do handshake e seus timeouts de cinco segundos permanecem como descritos nas seções anteriores.
+As funções `build_data`, `build_ack` e `parse_packet`, em `src/protocol.py`, montam e leem esses pacotes, validando seus campos e checksum. A validação de um pacote não determina se um ACK corresponde a um fragmento enviado nem se a mensagem completa respeita o `MAX_TEXT` negociado; essas regras dependem da sessão.
+
+As regras desta seção e das seguintes também definem o futuro envio de uma mensagem de texto não vazia, sem erros ou perdas. A fragmentação, a reconstrução e a transferência por sockets ainda não estão implementadas. Cada datagrama UDP transportará um pacote do protocolo. Os formatos do handshake e seus timeouts de cinco segundos permanecem como descritos nas seções anteriores.
 
 ### 4.1 Texto, fragmentação e sequência
 
@@ -158,7 +160,7 @@ Com o maior `MAX_TEXT` representável, serão necessários no máximo `ceil(65.5
 
 ### 4.2 DATA (Cliente -> Servidor)
 
-O pacote terá 8 bytes de cabeçalho, seguidos por `LEN` bytes de payload, totalizando de 9 a 24 bytes. Os deslocamentos abaixo começam em zero e se referem ao início do pacote da aplicação.
+O pacote tem 8 bytes de cabeçalho, seguidos por `LEN` bytes de payload, totalizando de 9 a 24 bytes. `build_data(seq, last, payload)` recebe o payload já codificado em bytes UTF-8 e retorna os bytes do pacote completo. Os deslocamentos abaixo começam em zero e se referem ao início do pacote da aplicação.
 
 ```
 +--------+--------+---------+--------+--------+----------+-------------+
@@ -177,11 +179,11 @@ O pacote terá 8 bytes de cabeçalho, seguidos por `LEN` bytes de payload, total
 | CHECKSUM | 6 | 2 bytes | Checksum de 16 bits em big-endian, de `0x0000` a `0xFFFF`, calculado conforme a seção 4.4 |
 | PAYLOAD | 8 | LEN bytes | UTF-8 válido com quatro pontos de código, ou de um a quatro no último fragmento |
 
-Não haverá terminador de texto nem bytes extras após o payload. `LEN` contará bytes, enquanto `MAX_TEXT` e o limite de quatro por fragmento contarão caracteres. Um byte será suficiente para `LEN`, pois o payload terá no máximo 16 bytes.
+Não há terminador de texto nem bytes extras após o payload. `LEN` conta bytes, enquanto `MAX_TEXT` e o limite de quatro por fragmento contam caracteres. Um byte é suficiente para `LEN`, pois o payload tem no máximo 16 bytes.
 
 ### 4.3 ACK (Servidor -> Cliente)
 
-O pacote terá exatamente 6 bytes e não carregará texto nem campo de comprimento de payload.
+O pacote tem exatamente 6 bytes e não carrega texto nem campo de comprimento de payload. `build_ack(seq)` recebe a sequência reconhecida e retorna os bytes do pacote completo.
 
 ```
 +--------+--------+---------+----------+
@@ -209,14 +211,16 @@ Em GBN, o servidor só poderá confirmar `n` quando tiver recebido todos os frag
 
 ### 4.4 Checksum de DATA e ACK
 
-O cálculo manual do checksum de 16 bits em complemento de um e sua verificação estão implementados em `src/protocol.py`, pelas funções `calculate_checksum(data)` e `verify_checksum(data)`, sem usar uma função pronta de checksum. Elas processam os bytes exatamente como recebidos, sem interpretar campos ou tipos de pacote. A montagem de `DATA` e `ACK` e a integração do checksum com esses pacotes ainda não estão implementadas. Os futuros construtores deverão zerar o campo `CHECKSUM` antes de chamar o cálculo, seguindo estas regras:
+O cálculo manual do checksum de 16 bits em complemento de um e sua verificação estão implementados em `src/protocol.py`, pelas funções `calculate_checksum(data)` e `verify_checksum(data)`, sem usar uma função pronta de checksum. Elas processam os bytes exatamente como recebidos, sem interpretar campos ou tipos de pacote. Os construtores de `DATA` e `ACK` zeram o campo `CHECKSUM` antes de chamar o cálculo, seguindo estas regras:
 
 1. Montar os bytes do pacote com os dois bytes de `CHECKSUM` zerados. Em `DATA`, o cálculo cobrirá `MAGIC`, `TYPE`, `SEQ`, `LAST`, `LEN`, o campo `CHECKSUM` zerado e todos os bytes do `PAYLOAD`. Em `ACK`, cobrirá os 6 bytes do pacote, também com `CHECKSUM` zerado. Cabeçalhos IP e UDP não entrarão nessa soma.
 2. Agrupar os bytes em palavras de 16 bits em big-endian. Se a quantidade de bytes for ímpar, acrescentar um byte zero à direita apenas para o cálculo. Esse preenchimento não será enviado e não entrará em `LEN`.
 3. Somar as palavras. Sempre que houver transporte além dos 16 bits, somá-lo de volta aos 16 bits inferiores, repetindo até não restar transporte.
 4. Inverter os 16 bits do resultado e gravar o valor no campo `CHECKSUM`, em big-endian.
 
-Na recepção, a mesma soma com transporte circular será feita sobre o pacote inteiro, desta vez incluindo o checksum recebido, sem zerá-lo. O byte zero de preenchimento será considerado novamente quando o tamanho for ímpar. O resultado deverá ser `0xFFFF`; de forma equivalente, seu complemento deverá ser `0x0000`. Só um pacote com checksum válido e campos coerentes poderá ser aceito ou confirmado. Essa verificação também valerá para os ACKs recebidos pelo cliente e não alterará os pacotes de handshake.
+Na leitura por `parse_packet`, a mesma soma com transporte circular é feita sobre o pacote inteiro, desta vez incluindo o checksum recebido, sem zerá-lo. O byte zero de preenchimento é considerado novamente quando o tamanho é ímpar. O resultado deve ser `0xFFFF`; de forma equivalente, seu complemento deve ser `0x0000`. O parser aplica essa verificação a `DATA` e `ACK` e rejeita campos inválidos, pacotes truncados e bytes extras com `ValueError`. Os pacotes de handshake não recebem checksum.
+
+Na futura transferência, só um pacote com checksum válido e campos coerentes poderá ser aceito ou confirmado. Essa regra também valerá para os ACKs recebidos pelo cliente; a integração com cliente e servidor ainda não está implementada.
 
 ---
 

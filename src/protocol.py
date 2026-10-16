@@ -1,4 +1,4 @@
-"""Definições do protocolo, checksum e parsing dos pacotes de handshake."""
+"""Definições do protocolo, checksum, montagem e parsing dos pacotes."""
 
 from enum import IntEnum
 
@@ -10,6 +10,8 @@ class PacketType(IntEnum):
     HELLO = 0x01
     HELLO_ACK = 0x02
     READY = 0x03
+    DATA = 0x04
+    ACK = 0x05
 
 
 class Mode(IntEnum):
@@ -29,6 +31,10 @@ class InvalidPacketError(ValueError):
 HEADER_SIZE = 2
 HELLO_BODY_SIZE = 5
 HELLO_ACK_BODY_SIZE = 1
+DATA_HEADER_SIZE = 8
+ACK_SIZE = 6
+MAX_SEQUENCE = 16383
+MAX_PAYLOAD_SIZE = 16
 
 
 def calculate_checksum(data: bytes) -> int:
@@ -72,6 +78,47 @@ def build_hello_ack(window: int) -> bytes:
 def build_ready() -> bytes:
     """Monta o pacote READY (2 bytes)."""
     return bytes([MAGIC, PacketType.READY])
+
+
+def _validate_sequence(seq: int) -> None:
+    if not isinstance(seq, int) or not (0 <= seq <= MAX_SEQUENCE):
+        raise ValueError(f"seq deve estar entre 0 e {MAX_SEQUENCE} (recebido {seq})")
+
+
+def _validate_data(seq: int, last: int, payload: bytes) -> None:
+    _validate_sequence(seq)
+    if not isinstance(last, int) or last not in (0, 1):
+        raise ValueError(f"last deve ser 0 ou 1 (recebido {last})")
+    if not (1 <= len(payload) <= MAX_PAYLOAD_SIZE):
+        raise ValueError(f"Payload de DATA deve ter entre 1 e {MAX_PAYLOAD_SIZE} bytes")
+    try:
+        code_points = len(payload.decode("utf-8"))
+    except UnicodeDecodeError:
+        raise ValueError("Payload de DATA deve conter UTF-8 válido") from None
+    if not (1 <= code_points <= 4):
+        raise ValueError("Payload de DATA deve conter de 1 a 4 pontos de código Unicode")
+    if last == 0 and code_points != 4:
+        raise ValueError("Fragmento não final deve conter exatamente 4 pontos de código Unicode")
+
+
+def build_data(seq: int, last: int, payload: bytes) -> bytes:
+    _validate_data(seq, last, payload)
+    header = (
+        bytes([MAGIC, PacketType.DATA])
+        + seq.to_bytes(2, byteorder="big")
+        + bytes([last, len(payload)])
+    )
+    packet = header + b"\x00\x00" + payload
+    checksum = calculate_checksum(packet)
+    return header + checksum.to_bytes(2, byteorder="big") + payload
+
+
+def build_ack(seq: int) -> bytes:
+    _validate_sequence(seq)
+    header = bytes([MAGIC, PacketType.ACK]) + seq.to_bytes(2, byteorder="big")
+    packet = header + b"\x00\x00"
+    checksum = calculate_checksum(packet)
+    return header + checksum.to_bytes(2, byteorder="big")
 
 
 def parse_packet(data: bytes) -> dict:
@@ -120,6 +167,42 @@ def parse_packet(data: bytes) -> dict:
         return {
             "type": pkt_type,
             "window": window,
+        }
+
+    if pkt_type is PacketType.DATA:
+        if not (DATA_HEADER_SIZE + 1 <= len(data) <= DATA_HEADER_SIZE + MAX_PAYLOAD_SIZE):
+            raise ValueError("Pacote DATA deve ter entre 9 e 24 bytes")
+        length = data[5]
+        if len(data) != DATA_HEADER_SIZE + length:
+            raise ValueError("LEN de DATA não corresponde ao tamanho do payload recebido")
+        if not verify_checksum(data):
+            raise ValueError("Checksum de DATA inválido")
+
+        seq = int.from_bytes(data[2:4], byteorder="big")
+        last = data[4]
+        payload = data[DATA_HEADER_SIZE:]
+        _validate_data(seq, last, payload)
+        return {
+            "type": pkt_type,
+            "seq": seq,
+            "last": last,
+            "length": length,
+            "checksum": int.from_bytes(data[6:8], byteorder="big"),
+            "payload": payload,
+        }
+
+    if pkt_type is PacketType.ACK:
+        if len(data) != ACK_SIZE:
+            raise ValueError(f"Pacote ACK deve ter exatamente {ACK_SIZE} bytes")
+        if not verify_checksum(data):
+            raise ValueError("Checksum de ACK inválido")
+
+        seq = int.from_bytes(data[2:4], byteorder="big")
+        _validate_sequence(seq)
+        return {
+            "type": pkt_type,
+            "seq": seq,
+            "checksum": int.from_bytes(data[4:6], byteorder="big"),
         }
 
     return {"type": pkt_type}

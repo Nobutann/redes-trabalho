@@ -4,9 +4,9 @@ Este projeto faz parte da disciplina de Infraestrutura de Comunicação. O objet
 
 Ao longo do trabalho, a aplicação passará a dividir textos em fragmentos de até quatro caracteres, acrescentar cabeçalhos com número de sequência, indicador de último fragmento e checksum, e controlar confirmações e retransmissões com Go-Back-N e Repetição Seletiva.
 
-**Estado atual:** Checkpoint 1 concluído. Cliente e servidor já realizam o handshake de três vias e trocam os parâmetros da comunicação. O cálculo e a verificação do checksum estão implementados e testados de forma independente. O envio do texto ainda será implementado no Checkpoint 2.
+**Estado atual:** Checkpoint 1 concluído. Cliente e servidor já realizam o handshake de três vias e trocam os parâmetros da comunicação. O checksum e a montagem e leitura dos pacotes `DATA` e `ACK` estão implementados e testados em `src/protocol.py`. O envio do texto ainda será implementado no Checkpoint 2.
 
-Os formatos de `DATA` e `ACK` e o fluxo de transferência sem erros estão especificados em [`docs/protocolo.md`](docs/protocolo.md), mas ainda não foram implementados. Essa definição parcial não conclui o CP2.
+Os formatos de `DATA` e `ACK` e o fluxo de transferência sem erros estão descritos em [`docs/protocolo.md`](docs/protocolo.md). A fragmentação, a reconstrução do texto, o envio de `DATA` e `ACK` e o controle das confirmações ainda não estão implementados. O suporte aos pacotes não conclui o CP2.
 
 ---
 
@@ -34,7 +34,8 @@ redes-trabalho/
 │   ├── server.py              # Servidor UDP e loop de handshake
 │   └── client.py              # Cliente UDP e interface CLI
 └── tests/
-    └── test_checksum.py       # Testes do cálculo e da verificação do checksum
+    ├── test_checksum.py       # Testes do cálculo e da verificação do checksum
+    └── test_packets.py        # Formatos, validação de DATA/ACK e compatibilidade do handshake
 ```
 
 ---
@@ -115,7 +116,7 @@ O registro completo dessa execução está em [`docs/exemplo-handshake.txt`](doc
 
 ## Testes
 
-Para executar os testes do checksum com o módulo `unittest` da biblioteca padrão:
+Para executar os testes do checksum e dos pacotes com o módulo `unittest` da biblioteca padrão:
 
 ```bash
 python -m unittest discover -s tests -v
@@ -123,10 +124,18 @@ python -m unittest discover -s tests -v
 
 Os testes usam valores esperados conhecidos e cobrem entradas pares e ímpares, transporte circular, checksum em seu campo, alteração de um bit e preservação dos bytes de entrada.
 
+Os testes de pacotes conferem os bytes e deslocamentos dos campos, as sequências de 0 a 16.383, os limites do payload, UTF-8 e a contagem de pontos de código sem normalização. Também verificam a rejeição de campos inválidos, pacotes truncados, bytes extras e checksum incorreto, além da compatibilidade dos pacotes de handshake.
+
+Para executar somente os testes de pacotes:
+
+```bash
+python -m unittest discover -s tests -p "test_packets.py" -v
+```
+
 Para executar as verificações de montagem e leitura de `HELLO`, `HELLO_ACK` e `READY`:
 
 ```bash
 python src/protocol.py
 ```
 
-As verificações de handshake cobrem os pacotes do CP1. A montagem de `DATA` e `ACK`, a integração do checksum e os testes de transferência ainda serão implementados.
+As verificações de handshake cobrem os pacotes do CP1. Os testes de `DATA` e `ACK` validam a montagem e leitura dos bytes, sem transferência por sockets. Os testes de transferência serão acrescentados quando esse fluxo for implementado.
