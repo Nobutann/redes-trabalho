@@ -263,6 +263,23 @@ class AckPacketTests(unittest.TestCase):
 
 
 class PacketCompatibilityTests(unittest.TestCase):
+    def test_window_boundaries(self):
+        for window in range(1, 6):
+            with self.subTest(window=window):
+                packet = build_hello_ack(window)
+                self.assertEqual(packet, bytes([0xAA, 0x02, window]))
+                self.assertEqual(parse_packet(packet)["window"], window)
+
+    def test_invalid_window(self):
+        for window in (-1, 0, 6, 256, 1.5, "3"):
+            with self.subTest(window=window):
+                with self.assertRaisesRegex(ValueError, "window"):
+                    build_hello_ack(window)
+        for window in (0, 6, 255):
+            with self.subTest(window=window):
+                with self.assertRaisesRegex(ValueError, "window"):
+                    parse_packet(bytes([0xAA, 0x02, window]))
+
     def test_hello_max_text_boundaries(self):
         for max_text, expected in (
             (30, "AA 01 00 00 00 1E 00"),

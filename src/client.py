@@ -1,4 +1,4 @@
-"""Cliente UDP com handshake e transferência individual de texto."""
+"""Cliente UDP com handshake e transferência individual ou em batch."""
 
 import argparse
 import socket
@@ -72,6 +72,8 @@ def run_client(
             print(f"[CLIENT] Pacotes DATA preparados: {len(data_packets)}")
             if mode is Mode.INDIVIDUAL:
                 send_individual(sock, server_addr, data_packets)
+            else:
+                send_batch(sock, server_addr, data_packets, strategy, window)
 
 
 def send_individual(sock: socket.socket, server_addr: tuple[str, int], packets: list[bytes]) -> None:
@@ -86,38 +88,86 @@ def await_ack(sock: socket.socket, server_addr: tuple[str, int], expected_seq: i
     deadline = monotonic() + TIMEOUT
     while True:
         try:
-            remaining = deadline - monotonic()
-            if remaining <= 0:
-                raise TimeoutError
-            sock.settimeout(remaining)
-            data, addr = sock.recvfrom(BUFSIZE)
+            pkt = receive_ack(sock, server_addr, deadline)
         except TimeoutError:
             print(f"[CLIENT] Timeout: ACK {expected_seq} não recebido após {TIMEOUT:.0f}s")
             sys.exit(1)
 
-        if addr != server_addr:
-            print(f"[CLIENT] Pacote de endereço inesperado {addr} ignorado")
+        if pkt is None:
             continue
-
-        try:
-            pkt = parse_packet(data)
-        except ValueError as exc:
-            print(f"[CLIENT] Pacote malformado recebido: {exc}")
-            continue
-
-        if pkt["type"] is not PacketType.ACK:
-            print(f"[CLIENT] Esperado ACK, recebido {pkt['type'].name}")
-            continue
-
-        print(f"[CLIENT] ACK recebido (seq={pkt['seq']}, checksum=0x{pkt['checksum']:04X})")
         if pkt["seq"] != expected_seq:
             print(f"[CLIENT] Sequência inesperada: esperado {expected_seq}, recebido {pkt['seq']}")
             continue
         return
 
 
+def receive_ack(sock: socket.socket, server_addr: tuple[str, int], deadline: float) -> dict | None:
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise TimeoutError
+    sock.settimeout(remaining)
+    data, addr = sock.recvfrom(BUFSIZE)
+    if addr != server_addr:
+        print(f"[CLIENT] Pacote de endereço inesperado {addr} ignorado")
+        return None
+    try:
+        pkt = parse_packet(data)
+    except ValueError as exc:
+        print(f"[CLIENT] Pacote malformado recebido: {exc}")
+        return None
+    if pkt["type"] is not PacketType.ACK:
+        print(f"[CLIENT] Esperado ACK, recebido {pkt['type'].name}")
+        return None
+    print(f"[CLIENT] ACK recebido (seq={pkt['seq']}, checksum=0x{pkt['checksum']:04X})")
+    return pkt
+
+
+def send_batch(
+    sock: socket.socket,
+    server_addr: tuple[str, int],
+    packets: list[bytes],
+    strategy: Strategy,
+    window: int,
+) -> None:
+    base = 0
+    next_seq = 0
+    confirmed = set()
+    deadline = monotonic() + TIMEOUT
+    while base < len(packets):
+        while next_seq < min(base + window, len(packets)):
+            sock.sendto(packets[next_seq], server_addr)
+            print(f"[CLIENT] DATA enviado (seq={next_seq})")
+            next_seq += 1
+
+        try:
+            pkt = receive_ack(sock, server_addr, deadline)
+        except TimeoutError:
+            print(f"[CLIENT] Timeout: sem novas confirmações após {TIMEOUT:.0f}s (base={base})")
+            sys.exit(1)
+        if pkt is None:
+            continue
+
+        seq = pkt["seq"]
+        if not (base <= seq < next_seq) or seq in confirmed:
+            print(f"[CLIENT] ACK {seq} sem nova confirmação ignorado")
+            continue
+
+        previous_base = base
+        if strategy is Strategy.GBN:
+            base = seq + 1
+        else:
+            confirmed.add(seq)
+            while base in confirmed:
+                confirmed.remove(base)
+                base += 1
+        if base != previous_base:
+            print(f"[CLIENT] Janela avançou (base={base}, window={window})")
+        deadline = monotonic() + TIMEOUT
+    print("[CLIENT] Transferência concluída: todos os fragmentos confirmados")
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Cliente UDP para handshake e transferência individual")
+    parser = argparse.ArgumentParser(description="Cliente UDP para transferência individual ou em batch")
     parser.add_argument("--host", default="127.0.0.1", help="Endereço IP do servidor (padrão: 127.0.0.1)")
     parser.add_argument(
         "--port",
@@ -135,7 +185,7 @@ def parse_args() -> argparse.Namespace:
         "--strategy",
         choices=["gbn", "sr"],
         default="gbn",
-        help="Estratégia de recuperação de erros no modo batch (padrão: gbn)",
+        help="Estratégia de confirmação no modo batch (padrão: gbn)",
     )
     parser.add_argument(
         "--max-text",
@@ -146,7 +196,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--text",
-        help="Texto para transferir no modo individual; em batch, apenas prepara pacotes DATA",
+        help="Texto para transferir no modo individual ou em batch",
     )
     return parser.parse_args()
 

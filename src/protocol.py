@@ -69,10 +69,14 @@ def build_hello(mode: Mode, strategy: Strategy, max_text: int) -> bytes:
     return header + body
 
 
+def validate_window(window: int) -> None:
+    if not isinstance(window, int) or not (1 <= window <= 5):
+        raise ValueError(f"window deve estar entre 1 e 5 (recebido {window})")
+
+
 def build_hello_ack(window: int) -> bytes:
     """Monta o pacote HELLO_ACK com o tamanho da janela (3 bytes)."""
-    if not (1 <= window <= 5):
-        raise ValueError(f"window deve estar entre 1 e 5 (recebido {window})")
+    validate_window(window)
 
     header = bytes([MAGIC, PacketType.HELLO_ACK])
     body = bytes([window])
@@ -184,8 +188,7 @@ def parse_packet(data: bytes) -> dict:
         if len(data) < min_size:
             raise ValueError(f"Pacote HELLO_ACK muito curto: esperado {min_size} bytes, recebido {len(data)}")
         window = data[offset]
-        if not (1 <= window <= 5):
-            raise ValueError(f"window deve estar entre 1 e 5 (recebido {window})")
+        validate_window(window)
         return {
             "type": pkt_type,
             "window": window,

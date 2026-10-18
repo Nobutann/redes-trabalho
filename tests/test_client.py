@@ -30,6 +30,11 @@ class ClientTests(unittest.TestCase):
         ):
             runpy.run_path(str(CLIENT_PATH), run_name="__main__")
 
+    def set_acks(self, count, address=("127.0.0.1", 50000), window=5):
+        self.sock.recvfrom.side_effect = [(protocol.build_hello_ack(window), address)] + [
+            (protocol.build_ack(seq), address) for seq in range(count)
+        ]
+
     def assert_handshake_only(
         self,
         mode=protocol.Mode.INDIVIDUAL,
@@ -49,39 +54,48 @@ class ClientTests(unittest.TestCase):
         self.assert_handshake_only()
         self.assertNotIn("preparados", self.output.getvalue())
 
-    def test_batch_prepares_data_without_sending_it(self):
+    def test_batch_prepares_and_sends_data(self):
+        self.set_acks(3)
         with patch.object(protocol, "build_data", wraps=protocol.build_data) as build_data:
             self.run_cli("--mode", "batch", "--text", "REDE LOCAL")
-        self.assert_handshake_only(mode=protocol.Mode.BATCH)
+        self.assertEqual(self.sock.sendto.call_count, 5)
         self.assertEqual(build_data.call_args_list, [
             call(seq=0, last=0, payload=b"REDE"),
             call(seq=1, last=0, payload=b" LOC"),
             call(seq=2, last=1, payload=b"AL"),
         ])
         self.assertIn("[CLIENT] Pacotes DATA preparados: 3", self.output.getvalue())
-        self.assertNotIn("texto enviado", self.output.getvalue().lower())
-        self.assertNotIn("entregue", self.output.getvalue().lower())
+        self.assertIn("[CLIENT] Transferência concluída", self.output.getvalue())
 
     def test_cli_preserves_unicode_and_whitespace(self):
         text = " A\u0301😀  "
+        self.set_acks(2)
         with patch.object(protocol, "prepare_data_packets",
                           wraps=protocol.prepare_data_packets) as prepare_packets:
             self.run_cli("--mode", "batch", "--text", text)
         prepare_packets.assert_called_once_with(text, 30)
-        self.assert_handshake_only(mode=protocol.Mode.BATCH)
+        self.assertEqual(self.sock.sendto.call_count, 4)
+        self.assertIn("[CLIENT] Transferência concluída", self.output.getvalue())
         self.assertIn("[CLIENT] Pacotes DATA preparados: 2", self.output.getvalue())
 
     def test_configured_limit_and_handshake_options(self):
-        self.sock.recvfrom.return_value = (protocol.build_hello_ack(5), ("192.0.2.1", 50001))
+        address = ("192.0.2.1", 50001)
+        self.set_acks(8, address, window=2)
         self.run_cli("--host", "192.0.2.1", "--port", "50001", "--mode", "batch",
                      "--strategy", "sr", "--max-text", "31", "--text", "A" * 31)
-        self.assert_handshake_only(protocol.Mode.BATCH, protocol.Strategy.SR, 31,
-                                   ("192.0.2.1", 50001))
+        self.assertEqual(self.sock.sendto.call_args_list[:2], [
+            call(protocol.build_hello(protocol.Mode.BATCH, protocol.Strategy.SR, 31), address),
+            call(protocol.build_ready(), address),
+        ])
+        self.assertEqual(self.sock.sendto.call_count, 10)
         self.assertIn("[CLIENT] Pacotes DATA preparados: 8", self.output.getvalue())
 
     def test_maximum_configured_limit(self):
+        self.set_acks(1)
         self.run_cli("--mode", "batch", "--max-text", "65535", "--text", "A")
-        self.assert_handshake_only(mode=protocol.Mode.BATCH, max_text=65535)
+        hello = self.sock.sendto.call_args_list[0].args[0]
+        self.assertEqual(protocol.parse_packet(hello)["max_text"], 65535)
+        self.assertEqual(self.sock.sendto.call_count, 3)
         self.assertIn("[CLIENT] Pacotes DATA preparados: 1", self.output.getvalue())
 
     def test_invalid_input_opens_no_socket(self):
@@ -113,9 +127,13 @@ class ClientTests(unittest.TestCase):
         help_text = " ".join(self.output.getvalue().split())
         self.assertIn("--text", help_text)
         self.assertIn("em caracteres, de 30 a 65535", help_text)
-        self.assertIn("transferir no modo individual", help_text)
-        self.assertIn("em batch, apenas prepara pacotes DATA", help_text)
+        self.assertIn("transferir no modo individual ou em batch", help_text)
         self.assertNotIn("em bytes", help_text)
+
+    def test_batch_without_text_preserves_handshake(self):
+        self.run_cli("--mode", "batch")
+        self.assert_handshake_only(mode=protocol.Mode.BATCH)
+        self.assertNotIn("Transferência concluída", self.output.getvalue())
 
     def test_individual_waits_for_valid_ack_before_next_data(self):
         address = ("127.0.0.1", 50000)

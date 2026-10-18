@@ -149,15 +149,16 @@ class ServerTests(unittest.TestCase):
         self.sock.recvfrom.assert_called_once()
         self.assertEqual(self.sock.settimeout.call_args, call(None))
 
-    def test_batch_does_not_start_transfer(self):
+    def test_batch_starts_after_ready_with_session_parameters(self):
         self.sock.recvfrom.side_effect = [
             (protocol.build_hello(protocol.Mode.BATCH, protocol.Strategy.SR, 30), self.address),
             (protocol.build_ready(), self.address),
         ]
-        with redirect_stdout(self.output), patch.object(server, "receive_individual") as receive:
-            server.await_hello(self.sock)
-        receive.assert_not_called()
-        self.sock.sendto.assert_called_once_with(protocol.build_hello_ack(5), self.address)
+        with redirect_stdout(self.output), patch.object(server, "receive_batch") as receive:
+            server.await_hello(self.sock, window=3)
+        receive.assert_called_once_with(self.sock, self.address, 30, protocol.Strategy.SR, 3)
+        self.sock.sendto.assert_called_once_with(protocol.build_hello_ack(3), self.address)
+        self.assertIn("window: 3", self.output.getvalue())
 
 
 if __name__ == "__main__":
