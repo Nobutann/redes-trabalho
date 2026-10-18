@@ -26,7 +26,6 @@ Os formatos de `DATA` e `ACK` e o fluxo de transferência sem erros estão descr
 redes-trabalho/
 ├── README.md
 ├── docs/
-│   ├── requisitos.md          # Especificação de requisitos do trabalho
 │   ├── protocolo.md           # Formato dos pacotes e fluxo de comunicação
 │   └── exemplo-handshake.txt  # Exemplo de saída do handshake
 ├── src/
