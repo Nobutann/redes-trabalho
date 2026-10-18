@@ -1,6 +1,6 @@
 # Especificação do protocolo
 
-Este documento descreve o handshake implementado no CP1 e a montagem e leitura dos pacotes `DATA` e `ACK`, implementadas para o CP2 com checksum e validação dos campos. O fluxo de transferência sem erros ou perdas está especificado, mas ainda não foi implementado. O suporte aos pacotes não conclui a especificação completa nem a implementação do checkpoint.
+Este documento descreve o handshake implementado no CP1 e a montagem e leitura dos pacotes `DATA` e `ACK`, implementadas para o CP2 com checksum e validação dos campos. O cliente também valida o texto e prepara seus pacotes `DATA`. O fluxo de transferência sem erros ou perdas está especificado, mas ainda não foi implementado. O CP2 permanece pendente.
 
 ## 1. Visão geral e parâmetros
 
@@ -13,15 +13,15 @@ A comunicação usa sockets UDP. No início de cada sessão, o cliente informa o
 | Ordem dos bytes | Big-endian | Usada nos campos com mais de um byte |
 | Modo de operação | `0` (Individual), `1` (Batch) | Definido no campo `MODE` do `HELLO` |
 | Estratégia de retransmissão | `0` (Go-Back-N), `1` (Repetição Seletiva) | Definido no campo `STRATEGY` do `HELLO` |
-| Payload máximo | 4 pontos de código Unicode, até 16 bytes em UTF-8 | Validado por pacote `DATA`; a fragmentação da mensagem ainda não está implementada |
+| Payload máximo | 4 pontos de código Unicode, até 16 bytes em UTF-8 | Texto fragmentado antes da codificação; limite validado por pacote `DATA` |
 | Limite máximo do texto | Padrão 30 caracteres; configurável de 30 a 65.535 | Informado no campo `MAX_TEXT` de 2 bytes do `HELLO` |
 | Janela de recepção | 1 a 5; fixada em 5 no CP1 e nesta especificação do CP2 | Enviada pelo servidor no `HELLO_ACK` |
 | Buffer do socket | 1024 bytes | Constante `BUFSIZE` |
 | Timeout do cliente | 5.0 segundos | Constante `TIMEOUT` |
 
-O mínimo de 30 se refere ao limite configurado, não ao tamanho obrigatório da mensagem. Com `MAX_TEXT = 30`, por exemplo, uma mensagem de dez caracteres está dentro do limite. Para a contagem e a fragmentação previstas no CP2, cada caractere corresponde a um ponto de código Unicode.
+O mínimo de 30 se refere ao limite configurado, não ao tamanho obrigatório da mensagem. Com `MAX_TEXT = 30`, por exemplo, uma mensagem de um caractere está dentro do limite. Para a contagem e a fragmentação, cada caractere corresponde a um ponto de código Unicode.
 
-No CP1, apenas o valor desse limite é trocado no handshake. A ajuda de `--max-text` no código ainda usa a palavra "bytes"; essa descrição precisa ser ajustada na etapa de implementação do CP2, pois o enunciado define o limite em caracteres. O campo de 2 bytes já limita a representação a 65.535, mas o cliente ainda não valida explicitamente esse teto antes de montar o `HELLO`.
+O cliente valida `--max-text` e, quando informado, `--text` antes de abrir o socket. Valores fora de 30 a 65.535, texto vazio ou acima do limite geram erro. `build_hello` também valida esse intervalo antes de codificar o campo de 2 bytes. Sem `--text`, a execução continua restrita ao handshake; com ele, os pacotes são preparados, mas não enviados.
 
 ---
 
@@ -133,7 +133,7 @@ CLIENTE                                                      SERVIDOR
 ### Validação e descarte
 
 - Se `MAGIC` for diferente de `0xAA`, a leitura do pacote gera `InvalidPacketError`. O servidor registra um aviso e descarta o pacote.
-- Valores de `MAX_TEXT` menores que 30 ou de `WINDOW` fora do intervalo de 1 a 5 geram `ValueError`.
+- Valores de `MAX_TEXT` fora do intervalo de 30 a 65.535 ou de `WINDOW` fora do intervalo de 1 a 5 geram `ValueError`.
 - Enquanto espera o `READY`, o servidor aceita apenas pacotes do endereço que enviou o `HELLO`. Pacotes de outras origens são ignorados.
 - Se o cliente não receber resposta em até cinco segundos, ele informa o timeout e encerra a tentativa.
 - O servidor também espera até cinco segundos pelo `READY`. Se esse prazo terminar sem a mensagem esperada, ele volta a aguardar um novo `HELLO`.
@@ -146,17 +146,19 @@ Esses timeouts encerram a tentativa de handshake. Ainda não há retransmissão 
 
 As funções `build_data`, `build_ack` e `parse_packet`, em `src/protocol.py`, montam e leem esses pacotes, validando seus campos e checksum. A validação de um pacote não determina se um ACK corresponde a um fragmento enviado nem se a mensagem completa respeita o `MAX_TEXT` negociado; essas regras dependem da sessão.
 
-As regras desta seção e das seguintes também definem o futuro envio de uma mensagem de texto não vazia, sem erros ou perdas. A fragmentação, a reconstrução e a transferência por sockets ainda não estão implementadas. Cada datagrama UDP transportará um pacote do protocolo. Os formatos do handshake e seus timeouts de cinco segundos permanecem como descritos nas seções anteriores.
+As regras desta seção e das seguintes também definem o futuro envio de uma mensagem de texto não vazia, sem erros ou perdas. A fragmentação e a preparação dos pacotes estão implementadas; a reconstrução no servidor e a transferência por sockets ainda não. Cada datagrama UDP transportará um pacote do protocolo. Os formatos do handshake e seus timeouts de cinco segundos permanecem como descritos nas seções anteriores.
 
 ### 4.1 Texto, fragmentação e sequência
 
-O cliente deverá aceitar textos de até `MAX_TEXT` caracteres, contando pontos de código Unicode antes da codificação em UTF-8. O padrão será 30 e o limite configurado deverá ficar entre 30 e 65.535. A mensagem poderá ser menor que 30 caracteres.
+O cliente aceita textos não vazios de até `MAX_TEXT` caracteres pelo argumento `--text`, contando pontos de código Unicode antes da codificação em UTF-8. O padrão é 30 e o limite configurado deve ficar entre 30 e 65.535. A mensagem pode ser menor que 30 caracteres.
 
-O texto original será dividido, na ordem, em fragmentos de quatro pontos de código. Apenas o último poderá ter menos de quatro. Cada fragmento será então codificado em UTF-8 separadamente, sem cortar os bytes de um caractere. Um ponto de código pode ocupar de um a quatro bytes em UTF-8; por isso, quatro caracteres podem ocupar de quatro a 16 bytes. Espaços também contam como caracteres. A contagem usará os pontos de código do texto original, sem normalização: um acento combinante separado contará como outro ponto de código.
+`prepare_data_packets(text, max_text)`, em `src/protocol.py`, valida esses limites e retorna uma lista dos pacotes completos em bytes, reutilizando `build_data`. A função independe de sockets e é chamada pelo cliente antes da comunicação.
 
-O primeiro fragmento terá `SEQ = 0`, e cada fragmento seguinte somará um à sequência. O último terá `LAST = 1`, mesmo quando contiver exatamente quatro caracteres; todos os anteriores terão `LAST = 0`.
+O texto original é dividido, na ordem, em fragmentos de quatro pontos de código. Apenas o último pode ter menos de quatro. Cada fragmento é então codificado em UTF-8 separadamente, sem cortar os bytes de um caractere. Um ponto de código pode ocupar de um a quatro bytes em UTF-8; por isso, quatro caracteres podem ocupar de quatro a 16 bytes. Espaços também contam como caracteres e são preservados. A contagem usa os pontos de código do texto original, sem normalização: um acento combinante separado conta como outro ponto de código.
 
-Com o maior `MAX_TEXT` representável, serão necessários no máximo `ceil(65.535 / 4) = 16.384` fragmentos, numerados de 0 a 16.383. Um byte de sequência não comporta esse total; dois bytes são suficientes e evitam reutilizar números dentro da mesma mensagem.
+O primeiro fragmento tem `SEQ = 0`, e cada fragmento seguinte soma um à sequência. O último tem `LAST = 1`, mesmo quando contém exatamente quatro caracteres; todos os anteriores têm `LAST = 0`.
+
+Com o maior `MAX_TEXT` representável, são necessários no máximo `ceil(65.535 / 4) = 16.384` fragmentos, numerados de 0 a 16.383. Um byte de sequência não comporta esse total; dois bytes são suficientes e evitam reutilizar números dentro da mesma mensagem.
 
 ### 4.2 DATA (Cliente -> Servidor)
 
@@ -226,7 +228,7 @@ Na futura transferência, só um pacote com checksum válido e campos coerentes 
 
 ## 5. Transferência sem erros ou perdas (especificada; ainda não implementada)
 
-Depois do handshake, o cliente deverá fragmentar o texto conforme a seção 4.1 e enviar os pacotes `DATA`. O servidor deverá conferir o formato e o checksum, guardar os fragmentos por sequência e confirmar cada `DATA` aceito, conforme as regras de ACK da seção 4.3. O servidor deverá exibir os metadados dos pacotes e a mensagem reconstruída; o cliente deverá exibir os metadados dos ACKs recebidos, conforme os requisitos do trabalho.
+Depois do handshake, o cliente deverá enviar os pacotes `DATA` preparados conforme a seção 4.1. O servidor deverá conferir o formato e o checksum, guardar os fragmentos por sequência e confirmar cada `DATA` aceito, conforme as regras de ACK da seção 4.3. O servidor deverá exibir os metadados dos pacotes e a mensagem reconstruída; o cliente deverá exibir os metadados dos ACKs recebidos, conforme os requisitos do trabalho.
 
 ### 5.1 Janela e avanço
 
@@ -247,11 +249,11 @@ O cliente só considerará o envio concluído quando tiver confirmação de todo
 
 ---
 
-## 6. Exemplos do fluxo especificado (ainda não implementado)
+## 6. Exemplos de preparação e do futuro fluxo de transferência
 
 ### 6.1 Texto “REDE LOCAL”
 
-Com `MAX_TEXT = 30`, a mensagem de dez caracteres estará dentro do limite e será dividida assim. As aspas apenas delimitam os fragmentos; o espaço inicial de `" LOC"` faz parte do texto.
+Com `MAX_TEXT = 30`, a mensagem de dez caracteres está dentro do limite e é dividida assim. As aspas apenas delimitam os fragmentos; o espaço inicial de `" LOC"` faz parte do texto.
 
 | SEQ | Fragmento | Caracteres | LEN em bytes UTF-8 | LAST | Tamanho do DATA |
 |---|---|---|---|---|---|
@@ -259,12 +261,12 @@ Com `MAX_TEXT = 30`, a mensagem de dez caracteres estará dentro do limite e ser
 | 1 | `" LOC"` | 4 | 4 | 0 | 12 bytes |
 | 2 | `"AL"` | 2 | 2 | 1 | 10 bytes |
 
-Cada `DATA` usará `TYPE = 0x04` e seu próprio checksum; cada ACK usará `TYPE = 0x05`, checksum próprio e tamanho de 6 bytes.
+Cada `DATA` preparado usa `TYPE = 0x04` e seu próprio checksum. Na futura transferência, cada ACK usará `TYPE = 0x05`, checksum próprio e tamanho de 6 bytes.
 
 No modo individual, o fluxo será `DATA 0 -> ACK 0`, depois `DATA 1 -> ACK 1` e `DATA 2 -> ACK 2`. Em batch, os três fragmentos caberão na janela de cinco. Em SR, os ACKs 0, 1 e 2 confirmarão os respectivos fragmentos; em GBN, esses mesmos ACKs confirmarão cumulativamente até 0, até 1 e até 2. Ao ter os três fragmentos, o servidor reconstruirá “REDE LOCAL”; o cliente concluirá quando todos estiverem confirmados.
 
 ### 6.2 Texto com acentos: “AÇÃO”
 
-Usando `Ç` e `Ã` como pontos de código únicos, “AÇÃO” terá quatro caracteres e formará um único fragmento. Em UTF-8, seus bytes serão `41 C3 87 C3 83 4F`: `A` e `O` ocuparão um byte cada, e `Ç` e `Ã`, dois bytes cada.
+Usando `Ç` e `Ã` como pontos de código únicos, “AÇÃO” tem quatro caracteres e forma um único fragmento. Em UTF-8, seus bytes são `41 C3 87 C3 83 4F`: `A` e `O` ocupam um byte cada, e `Ç` e `Ã`, dois bytes cada.
 
-Esse `DATA` terá `SEQ = 0`, `LAST = 1` e `LEN = 6`, totalizando 14 bytes com o cabeçalho. Para `MAX_TEXT`, o texto contará como quatro caracteres; para `LEN` e o checksum, o payload terá seis bytes. O `ACK 0` confirmará o fragmento nos dois modos.
+Esse `DATA` tem `SEQ = 0`, `LAST = 1` e `LEN = 6`, totalizando 14 bytes com o cabeçalho. Para `MAX_TEXT`, o texto conta como quatro caracteres; para `LEN` e o checksum, o payload tem seis bytes. Na futura transferência, o `ACK 0` confirmará o fragmento nos dois modos.

@@ -2,11 +2,11 @@
 
 Este projeto faz parte da disciplina de Infraestrutura de Comunicação. O objetivo é construir uma aplicação cliente-servidor que use UDP e implemente suas próprias regras de transporte confiável.
 
-Ao longo do trabalho, a aplicação passará a dividir textos em fragmentos de até quatro caracteres, acrescentar cabeçalhos com número de sequência, indicador de último fragmento e checksum, e controlar confirmações e retransmissões com Go-Back-N e Repetição Seletiva.
+A aplicação divide textos em fragmentos de até quatro caracteres e prepara pacotes com número de sequência, indicador de último fragmento e checksum. O envio dos fragmentos, as confirmações e as retransmissões com Go-Back-N e Repetição Seletiva serão implementados nas próximas etapas.
 
-**Estado atual:** Checkpoint 1 concluído. Cliente e servidor já realizam o handshake de três vias e trocam os parâmetros da comunicação. O checksum e a montagem e leitura dos pacotes `DATA` e `ACK` estão implementados e testados em `src/protocol.py`. O envio do texto ainda será implementado no Checkpoint 2.
+**Estado atual:** Checkpoint 1 concluído. Cliente e servidor já realizam o handshake de três vias e trocam os parâmetros da comunicação. O checksum e a montagem e leitura dos pacotes `DATA` e `ACK` estão implementados e testados em `src/protocol.py`. O cliente aceita texto pela CLI, valida o limite e prepara os pacotes `DATA`, sem enviá-los por sockets.
 
-Os formatos de `DATA` e `ACK` e o fluxo de transferência sem erros estão descritos em [`docs/protocolo.md`](docs/protocolo.md). A fragmentação, a reconstrução do texto, o envio de `DATA` e `ACK` e o controle das confirmações ainda não estão implementados. O suporte aos pacotes não conclui o CP2.
+Os formatos de `DATA` e `ACK` e o fluxo de transferência sem erros estão descritos em [`docs/protocolo.md`](docs/protocolo.md). A reconstrução do texto no servidor, o envio de `DATA` e `ACK` e o controle das confirmações ainda não estão implementados. O CP2 permanece pendente.
 
 ---
 
@@ -29,11 +29,13 @@ redes-trabalho/
 │   ├── protocolo.md           # Formato dos pacotes e fluxo de comunicação
 │   └── exemplo-handshake.txt  # Exemplo de saída do handshake
 ├── src/
-│   ├── protocol.py            # Constantes, tipos, checksum, montagem e leitura dos pacotes
+│   ├── protocol.py            # Fragmentação, checksum, montagem e leitura dos pacotes
 │   ├── server.py              # Servidor UDP e loop de handshake
 │   └── client.py              # Cliente UDP e interface CLI
 └── tests/
     ├── test_checksum.py       # Testes do cálculo e da verificação do checksum
+    ├── test_client.py         # CLI, validação antes do socket e preservação do handshake
+    ├── test_fragmentation.py  # Preparação de DATA, limites e preservação do texto
     └── test_packets.py        # Formatos, validação de DATA/ACK e compatibilidade do handshake
 ```
 
@@ -70,9 +72,12 @@ python src/client.py --mode batch --strategy gbn
 
 # Modo lote com Repetição Seletiva e limite de texto igual a 100
 python src/client.py --mode batch --strategy sr --max-text 100
+
+# Handshake e preparação de três pacotes DATA
+python src/client.py --text "REDE LOCAL"
 ```
 
-No CP1, esses comandos apenas negociam o modo e a estratégia. A transferência de dados ainda não acontece.
+Sem `--text`, o cliente executa apenas o handshake. Com `--text`, valida e prepara os pacotes antes de abrir o socket; após o handshake, informa a quantidade preparada, por exemplo, `[CLIENT] Pacotes DATA preparados: 3`. A transferência de dados ainda não acontece.
 
 Parâmetros disponíveis em `client.py`:
 
@@ -80,7 +85,8 @@ Parâmetros disponíveis em `client.py`:
 - `--port`: Porta UDP do servidor (padrão: `50000`)
 - `--mode`: Modo de transferência — `individual` ou `batch` (padrão: `individual`)
 - `--strategy`: Estratégia de retransmissão — `gbn` ou `sr` (padrão: `gbn`)
-- `--max-text`: Limite máximo previsto para o texto, em caracteres, de 30 a 65.535 (padrão: `30`). Isso não obriga cada mensagem a ter 30 caracteres.
+- `--max-text`: Limite máximo do texto, em caracteres, de 30 a 65.535 (padrão: `30`). Isso não obriga cada mensagem a ter 30 caracteres.
+- `--text`: Texto não vazio para preparar pacotes `DATA`, com até `--max-text` caracteres. Espaços são preservados e cada ponto de código Unicode conta como um caractere, sem normalização. Use aspas para manter espaços no argumento.
 
 Se mudar a porta do servidor, informe a mesma porta ao cliente com `--port`. Para acessar um servidor em outra máquina, use `--host` seguido do IP correspondente.
 
@@ -115,7 +121,7 @@ O registro completo dessa execução está em [`docs/exemplo-handshake.txt`](doc
 
 ## Testes
 
-Para executar os testes do checksum e dos pacotes com o módulo `unittest` da biblioteca padrão:
+Para executar os testes com o módulo `unittest` da biblioteca padrão:
 
 ```bash
 python -m unittest discover -s tests -v
@@ -124,6 +130,8 @@ python -m unittest discover -s tests -v
 Os testes usam valores esperados conhecidos e cobrem entradas pares e ímpares, transporte circular, checksum em seu campo, alteração de um bit e preservação dos bytes de entrada.
 
 Os testes de pacotes conferem os bytes e deslocamentos dos campos, as sequências de 0 a 16.383, os limites do payload, UTF-8 e a contagem de pontos de código sem normalização. Também verificam a rejeição de campos inválidos, pacotes truncados, bytes extras e checksum incorreto, além da compatibilidade dos pacotes de handshake.
+
+Os testes de preparação cobrem sequências, `LAST`, payloads, checksum e reconstrução exata do texto, incluindo espaços, acentos, caracteres de quatro bytes em UTF-8 e os limites de `max_text`. Os testes da CLI usam sockets simulados para conferir a rejeição de entradas inválidas antes da comunicação e o envio apenas dos pacotes de handshake.
 
 Para executar somente os testes de pacotes:
 
@@ -137,4 +145,4 @@ Para executar as verificações de montagem e leitura de `HELLO`, `HELLO_ACK` e 
 python src/protocol.py
 ```
 
-As verificações de handshake cobrem os pacotes do CP1. Os testes de `DATA` e `ACK` validam a montagem e leitura dos bytes, sem transferência por sockets. Os testes de transferência serão acrescentados quando esse fluxo for implementado.
+As verificações de handshake cobrem os pacotes do CP1. Os testes de `DATA` e `ACK` validam a preparação, montagem e leitura dos bytes, sem transferência por sockets. Os testes de transferência serão acrescentados quando esse fluxo for implementado.

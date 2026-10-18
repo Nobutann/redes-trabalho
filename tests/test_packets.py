@@ -263,6 +263,25 @@ class AckPacketTests(unittest.TestCase):
 
 
 class PacketCompatibilityTests(unittest.TestCase):
+    def test_hello_max_text_boundaries(self):
+        for max_text, expected in (
+            (30, "AA 01 00 00 00 1E 00"),
+            (65535, "AA 01 00 00 FF FF 00"),
+        ):
+            with self.subTest(max_text=max_text):
+                packet = build_hello(Mode.INDIVIDUAL, Strategy.GBN, max_text)
+                self.assertEqual(packet, bytes.fromhex(expected))
+                self.assertEqual(parse_packet(packet)["max_text"], max_text)
+
+    def test_hello_invalid_max_text(self):
+        for max_text in (-1, 0, 29, 65536, 100000, 30.5):
+            with self.subTest(max_text=max_text):
+                with self.assertRaisesRegex(ValueError, "max_text.*30.*65535"):
+                    build_hello(Mode.INDIVIDUAL, Strategy.GBN, max_text)
+
+        with self.assertRaisesRegex(ValueError, "max_text"):
+            parse_packet(bytes.fromhex("AA 01 00 00 00 1D 00"))
+
     def test_handshake_layout_and_parse(self):
         cases = (
             (build_hello(Mode.BATCH, Strategy.SR, max_text=100), "AA 01 01 01 00 64 00", {

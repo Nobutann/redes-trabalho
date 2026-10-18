@@ -55,10 +55,14 @@ def verify_checksum(data: bytes) -> bool:
     return calculate_checksum(data) == 0x0000
 
 
+def _validate_max_text(max_text: int) -> None:
+    if not isinstance(max_text, int) or not (30 <= max_text <= 65535):
+        raise ValueError(f"max_text deve estar entre 30 e 65535 caracteres (recebido {max_text})")
+
+
 def build_hello(mode: Mode, strategy: Strategy, max_text: int) -> bytes:
     """Monta o pacote HELLO (7 bytes)."""
-    if max_text < 30:
-        raise ValueError(f"max_text deve ser >= 30 (recebido {max_text})")
+    _validate_max_text(max_text)
 
     header = bytes([MAGIC, PacketType.HELLO])
     body = bytes([int(mode), int(strategy)]) + max_text.to_bytes(2, byteorder="big") + bytes([0x00])
@@ -113,6 +117,25 @@ def build_data(seq: int, last: int, payload: bytes) -> bytes:
     return header + checksum.to_bytes(2, byteorder="big") + payload
 
 
+def prepare_data_packets(text: str, max_text: int) -> list[bytes]:
+    _validate_max_text(max_text)
+    text_length = len(text)
+    if text_length == 0:
+        raise ValueError("Texto não pode ser vazio")
+    if text_length > max_text:
+        raise ValueError(f"Texto deve ter no máximo {max_text} caracteres (recebido {text_length})")
+
+    packets = []
+    for seq, offset in enumerate(range(0, text_length, 4)):
+        fragment = text[offset : offset + 4]
+        packets.append(build_data(
+            seq=seq,
+            last=int(offset + 4 >= text_length),
+            payload=fragment.encode("utf-8"),
+        ))
+    return packets
+
+
 def build_ack(seq: int) -> bytes:
     _validate_sequence(seq)
     header = bytes([MAGIC, PacketType.ACK]) + seq.to_bytes(2, byteorder="big")
@@ -147,8 +170,7 @@ def parse_packet(data: bytes) -> dict:
         strategy_raw = data[offset + 1]
         max_text = int.from_bytes(data[offset + 2 : offset + 4], byteorder="big")
         reserved = data[offset + 4]
-        if max_text < 30:
-            raise ValueError(f"max_text deve ser >= 30 (recebido {max_text})")
+        _validate_max_text(max_text)
         return {
             "type": pkt_type,
             "mode": Mode(mode_raw),

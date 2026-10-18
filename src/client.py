@@ -1,4 +1,4 @@
-"""Cliente UDP para a fase de handshake (CP1)."""
+"""Cliente UDP com handshake e preparação dos pacotes DATA."""
 
 import argparse
 import socket
@@ -12,19 +12,28 @@ from protocol import (
     build_hello,
     build_ready,
     parse_packet,
+    prepare_data_packets,
 )
 
 BUFSIZE = 1024
 TIMEOUT = 5.0
 
 
-def run_client(host: str, port: int, mode: Mode, strategy: Strategy, max_text: int) -> None:
+def run_client(
+    host: str,
+    port: int,
+    mode: Mode,
+    strategy: Strategy,
+    max_text: int,
+    text: str | None = None,
+) -> None:
+    hello = build_hello(mode, strategy, max_text)
+    data_packets = prepare_data_packets(text, max_text) if text is not None else None
     server_addr = (host, port)
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.settimeout(TIMEOUT)
 
-        hello = build_hello(mode, strategy, max_text)
         sock.sendto(hello, server_addr)
         print(f"[CLIENT] HELLO enviado para {host}:{port}")
         print(f"  modo: {mode.name}, estratégia: {strategy.name}, max_text: {max_text}")
@@ -54,9 +63,12 @@ def run_client(host: str, port: int, mode: Mode, strategy: Strategy, max_text: i
         print(f"[CLIENT] Handshake concluído com {host}:{port}")
         print(f"  modo: {mode.name}, estratégia: {strategy.name}, max_text: {max_text}, window: {window}")
 
+    if data_packets is not None:
+        print(f"[CLIENT] Pacotes DATA preparados: {len(data_packets)}")
+
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Cliente UDP para handshake (CP1)")
+    parser = argparse.ArgumentParser(description="Cliente UDP para handshake e preparação de DATA")
     parser.add_argument("--host", default="127.0.0.1", help="Endereço IP do servidor (padrão: 127.0.0.1)")
     parser.add_argument(
         "--port",
@@ -81,7 +93,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=30,
         dest="max_text",
-        help="Tamanho máximo do texto em bytes, >= 30 (padrão: 30)",
+        help="Tamanho máximo do texto em caracteres, de 30 a 65535 (padrão: 30)",
+    )
+    parser.add_argument(
+        "--text",
+        help="Texto para preparar pacotes DATA, sem envio por sockets",
     )
     return parser.parse_args()
 
@@ -89,11 +105,11 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = parse_args()
 
-    if args.max_text < 30:
-        print(f"[CLIENT] Erro: --max-text deve ser >= 30 (recebido: {args.max_text})")
-        sys.exit(1)
-
     mode = Mode.INDIVIDUAL if args.mode == "individual" else Mode.BATCH
     strategy = Strategy.GBN if args.strategy == "gbn" else Strategy.SR
 
-    run_client(args.host, args.port, mode, strategy, args.max_text)
+    try:
+        run_client(args.host, args.port, mode, strategy, args.max_text, args.text)
+    except ValueError as exc:
+        print(f"[CLIENT] Erro: {exc}")
+        sys.exit(1)
