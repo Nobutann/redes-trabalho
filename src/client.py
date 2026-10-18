@@ -1,8 +1,9 @@
-"""Cliente UDP com handshake e preparação dos pacotes DATA."""
+"""Cliente UDP com handshake e transferência individual de texto."""
 
 import argparse
 import socket
 import sys
+from time import monotonic
 
 from protocol import (
     DEFAULT_PORT,
@@ -29,7 +30,7 @@ def run_client(
 ) -> None:
     hello = build_hello(mode, strategy, max_text)
     data_packets = prepare_data_packets(text, max_text) if text is not None else None
-    server_addr = (host, port)
+    server_addr = (socket.gethostbyname(host), port)
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.settimeout(TIMEOUT)
@@ -39,9 +40,13 @@ def run_client(
         print(f"  modo: {mode.name}, estratégia: {strategy.name}, max_text: {max_text}")
 
         try:
-            data, _ = sock.recvfrom(BUFSIZE)
+            data, addr = sock.recvfrom(BUFSIZE)
         except TimeoutError:
             print(f"[CLIENT] Timeout: sem resposta de {host}:{port} após {TIMEOUT:.0f}s")
+            sys.exit(1)
+
+        if addr != server_addr:
+            print(f"[CLIENT] Erro: resposta de endereço inesperado {addr}")
             sys.exit(1)
 
         try:
@@ -63,12 +68,56 @@ def run_client(
         print(f"[CLIENT] Handshake concluído com {host}:{port}")
         print(f"  modo: {mode.name}, estratégia: {strategy.name}, max_text: {max_text}, window: {window}")
 
-    if data_packets is not None:
-        print(f"[CLIENT] Pacotes DATA preparados: {len(data_packets)}")
+        if data_packets is not None:
+            print(f"[CLIENT] Pacotes DATA preparados: {len(data_packets)}")
+            if mode is Mode.INDIVIDUAL:
+                send_individual(sock, server_addr, data_packets)
+
+
+def send_individual(sock: socket.socket, server_addr: tuple[str, int], packets: list[bytes]) -> None:
+    for seq, packet in enumerate(packets):
+        sock.sendto(packet, server_addr)
+        print(f"[CLIENT] DATA enviado (seq={seq})")
+        await_ack(sock, server_addr, seq)
+    print("[CLIENT] Transferência concluída: todos os fragmentos confirmados")
+
+
+def await_ack(sock: socket.socket, server_addr: tuple[str, int], expected_seq: int) -> None:
+    deadline = monotonic() + TIMEOUT
+    while True:
+        try:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            sock.settimeout(remaining)
+            data, addr = sock.recvfrom(BUFSIZE)
+        except TimeoutError:
+            print(f"[CLIENT] Timeout: ACK {expected_seq} não recebido após {TIMEOUT:.0f}s")
+            sys.exit(1)
+
+        if addr != server_addr:
+            print(f"[CLIENT] Pacote de endereço inesperado {addr} ignorado")
+            continue
+
+        try:
+            pkt = parse_packet(data)
+        except ValueError as exc:
+            print(f"[CLIENT] Pacote malformado recebido: {exc}")
+            continue
+
+        if pkt["type"] is not PacketType.ACK:
+            print(f"[CLIENT] Esperado ACK, recebido {pkt['type'].name}")
+            continue
+
+        print(f"[CLIENT] ACK recebido (seq={pkt['seq']}, checksum=0x{pkt['checksum']:04X})")
+        if pkt["seq"] != expected_seq:
+            print(f"[CLIENT] Sequência inesperada: esperado {expected_seq}, recebido {pkt['seq']}")
+            continue
+        return
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Cliente UDP para handshake e preparação de DATA")
+    parser = argparse.ArgumentParser(description="Cliente UDP para handshake e transferência individual")
     parser.add_argument("--host", default="127.0.0.1", help="Endereço IP do servidor (padrão: 127.0.0.1)")
     parser.add_argument(
         "--port",
@@ -97,7 +146,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--text",
-        help="Texto para preparar pacotes DATA, sem envio por sockets",
+        help="Texto para transferir no modo individual; em batch, apenas prepara pacotes DATA",
     )
     return parser.parse_args()
 

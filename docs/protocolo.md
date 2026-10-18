@@ -1,6 +1,6 @@
 # Especificação do protocolo
 
-Este documento descreve o handshake implementado no CP1 e a montagem e leitura dos pacotes `DATA` e `ACK`, implementadas para o CP2 com checksum e validação dos campos. O cliente também valida o texto e prepara seus pacotes `DATA`. O fluxo de transferência sem erros ou perdas está especificado, mas ainda não foi implementado. O CP2 permanece pendente.
+Este documento descreve o handshake implementado no CP1 e os pacotes `DATA` e `ACK`, com checksum e validação dos campos. A transferência individual de texto sem erros ou perdas está implementada. Em batch, apenas o handshake e a preparação dos pacotes estão implementados; o fluxo de transferência segue especificado para uma próxima etapa. O CP2 permanece pendente.
 
 ## 1. Visão geral e parâmetros
 
@@ -17,11 +17,12 @@ A comunicação usa sockets UDP. No início de cada sessão, o cliente informa o
 | Limite máximo do texto | Padrão 30 caracteres; configurável de 30 a 65.535 | Informado no campo `MAX_TEXT` de 2 bytes do `HELLO` |
 | Janela de recepção | 1 a 5; fixada em 5 no CP1 e nesta especificação do CP2 | Enviada pelo servidor no `HELLO_ACK` |
 | Buffer do socket | 1024 bytes | Constante `BUFSIZE` |
-| Timeout do cliente | 5.0 segundos | Constante `TIMEOUT` |
+| Timeout do cliente | 5.0 segundos | Espera por `HELLO_ACK` e por cada ACK de DATA |
+| Timeout de sessão no servidor | 5.0 segundos | Espera por `READY` ou pelo próximo `DATA` válido |
 
 O mínimo de 30 se refere ao limite configurado, não ao tamanho obrigatório da mensagem. Com `MAX_TEXT = 30`, por exemplo, uma mensagem de um caractere está dentro do limite. Para a contagem e a fragmentação, cada caractere corresponde a um ponto de código Unicode.
 
-O cliente valida `--max-text` e, quando informado, `--text` antes de abrir o socket. Valores fora de 30 a 65.535, texto vazio ou acima do limite geram erro. `build_hello` também valida esse intervalo antes de codificar o campo de 2 bytes. Sem `--text`, a execução continua restrita ao handshake; com ele, os pacotes são preparados, mas não enviados.
+O cliente valida `--max-text` e, quando informado, `--text` antes de abrir o socket. Valores fora de 30 a 65.535, texto vazio ou acima do limite geram erro. `build_hello` também valida esse intervalo antes de codificar o campo de 2 bytes. Sem `--text`, a execução continua restrita ao handshake; com ele, os pacotes são transferidos no modo individual ou apenas preparados em batch.
 
 ---
 
@@ -46,8 +47,8 @@ Todos os pacotes começam com dois campos: `MAGIC`, que identifica o protocolo, 
 | `0x01` | `HELLO` | Implementado no CP1 |
 | `0x02` | `HELLO_ACK` | Implementado no CP1 |
 | `0x03` | `READY` | Implementado no CP1 |
-| `0x04` | `DATA` | Montagem e leitura com checksum implementadas; envio ainda não implementado |
-| `0x05` | `ACK` | Montagem e leitura com checksum implementadas; envio ainda não implementado |
+| `0x04` | `DATA` | Montagem, leitura e transferência individual implementadas; envio em batch pendente |
+| `0x05` | `ACK` | Montagem, leitura e confirmação individual implementadas; confirmação em batch pendente |
 
 Todos os campos numéricos são inteiros sem sinal. Campos com mais de um byte usam big-endian, com o byte mais significativo primeiro.
 
@@ -109,6 +110,8 @@ O cliente envia `READY` para confirmar que recebeu a janela. Esse pacote contém
 
 O handshake tem três mensagens. Ao final, as duas pontas exibem os parâmetros acordados. Na versão do CP1, o cliente encerra a execução e o servidor volta a aguardar uma nova sessão.
 
+Na versão atual, o modo individual com `--text` continua a transferência pelo mesmo socket. O servidor mantém o endereço e os parâmetros da sessão e só inicia a recepção após um `READY` válido. Em batch, volta a aguardar `HELLO` ao concluir o handshake.
+
 ```
 CLIENTE                                                      SERVIDOR
    |                                                            |
@@ -127,7 +130,7 @@ CLIENTE                                                      SERVIDOR
    |     MAGIC(0xAA) | 0x03                                     |
    |  --------------------------------------------------------> |
    |  (handshake pronto)                                        | (handshake concluído;
-   |                                                            |  retorna a aguardar novas sessões)
+   |                                                            |  segue conforme o modo negociado)
 ```
 
 ### Validação e descarte
@@ -136,17 +139,17 @@ CLIENTE                                                      SERVIDOR
 - Valores de `MAX_TEXT` fora do intervalo de 30 a 65.535 ou de `WINDOW` fora do intervalo de 1 a 5 geram `ValueError`.
 - Enquanto espera o `READY`, o servidor aceita apenas pacotes do endereço que enviou o `HELLO`. Pacotes de outras origens são ignorados.
 - Se o cliente não receber resposta em até cinco segundos, ele informa o timeout e encerra a tentativa.
-- O servidor também espera até cinco segundos pelo `READY`. Se esse prazo terminar sem a mensagem esperada, ele volta a aguardar um novo `HELLO`.
+- O servidor também espera até cinco segundos pelo `READY`. Se esse prazo terminar sem a mensagem esperada, registra o handshake interrompido e volta a aguardar um novo `HELLO`, sem iniciar a recepção de DATA.
 
 Esses timeouts encerram a tentativa de handshake. Ainda não há retransmissão automática.
 
 ---
 
-## 4. DATA e ACK (montagem e leitura implementadas)
+## 4. DATA e ACK
 
 As funções `build_data`, `build_ack` e `parse_packet`, em `src/protocol.py`, montam e leem esses pacotes, validando seus campos e checksum. A validação de um pacote não determina se um ACK corresponde a um fragmento enviado nem se a mensagem completa respeita o `MAX_TEXT` negociado; essas regras dependem da sessão.
 
-As regras desta seção e das seguintes também definem o futuro envio de uma mensagem de texto não vazia, sem erros ou perdas. A fragmentação e a preparação dos pacotes estão implementadas; a reconstrução no servidor e a transferência por sockets ainda não. Cada datagrama UDP transportará um pacote do protocolo. Os formatos do handshake e seus timeouts de cinco segundos permanecem como descritos nas seções anteriores.
+As regras desta seção e das seguintes definem a transferência de uma mensagem de texto não vazia, sem erros ou perdas. A fragmentação, a preparação dos pacotes, a transferência individual por sockets e a reconstrução no servidor estão implementadas. A transferência em batch permanece pendente. Cada datagrama UDP transporta um pacote do protocolo. Os formatos do handshake e seus timeouts de cinco segundos permanecem como descritos nas seções anteriores.
 
 ### 4.1 Texto, fragmentação e sequência
 
@@ -222,19 +225,21 @@ O cálculo manual do checksum de 16 bits em complemento de um e sua verificaçã
 
 Na leitura por `parse_packet`, a mesma soma com transporte circular é feita sobre o pacote inteiro, desta vez incluindo o checksum recebido, sem zerá-lo. O byte zero de preenchimento é considerado novamente quando o tamanho é ímpar. O resultado deve ser `0xFFFF`; de forma equivalente, seu complemento deve ser `0x0000`. O parser aplica essa verificação a `DATA` e `ACK` e rejeita campos inválidos, pacotes truncados e bytes extras com `ValueError`. Os pacotes de handshake não recebem checksum.
 
-Na futura transferência, só um pacote com checksum válido e campos coerentes poderá ser aceito ou confirmado. Essa regra também valerá para os ACKs recebidos pelo cliente; a integração com cliente e servidor ainda não está implementada.
+Na transferência individual, só um pacote com checksum válido e campos coerentes pode ser aceito ou confirmado. O servidor valida os DATA e o cliente valida os ACKs com `parse_packet`, além de conferir a origem e a sequência esperadas.
 
 ---
 
-## 5. Transferência sem erros ou perdas (especificada; ainda não implementada)
+## 5. Transferência sem erros ou perdas (individual implementado; batch pendente)
 
-Depois do handshake, o cliente deverá enviar os pacotes `DATA` preparados conforme a seção 4.1. O servidor deverá conferir o formato e o checksum, guardar os fragmentos por sequência e confirmar cada `DATA` aceito, conforme as regras de ACK da seção 4.3. O servidor deverá exibir os metadados dos pacotes e a mensagem reconstruída; o cliente deverá exibir os metadados dos ACKs recebidos, conforme os requisitos do trabalho.
+Depois do handshake, o cliente individual envia os pacotes `DATA` preparados conforme a seção 4.1. O servidor recebe apenas da sessão ativa e aceita somente a sequência esperada, começando em zero. Antes de armazenar e confirmar cada fragmento, confere o formato, o checksum e o limite total de caracteres negociado. Pacotes inválidos, de outra origem, duplicados ou fora de ordem são descartados sem ACK e sem acrescentar conteúdo.
+
+O servidor exibe sequência, `LAST`, comprimento e checksum dos DATA recebidos; o cliente exibe sequência e checksum dos ACKs recebidos. Um ACK só permite avançar se vier do endereço do servidor e tiver o tipo, o checksum e a sequência esperados. O cliente resolve `localhost` para conferir esse endereço.
 
 ### 5.1 Janela e avanço
 
-O servidor manterá `WINDOW = 5` no `HELLO_ACK` nesta etapa. No modo individual, o cliente manterá apenas um pacote sem confirmação: enviará o fragmento `n`, aguardará seu ACK e só então enviará `n + 1`.
+O servidor mantém `WINDOW = 5` no `HELLO_ACK`. No modo individual, o cliente mantém apenas um pacote sem confirmação: envia o fragmento `n`, aguarda seu ACK e só então envia `n + 1`. O comportamento é o mesmo com estratégia GBN ou SR.
 
-No modo batch, a base da janela será o menor número de sequência ainda não confirmado. O cliente poderá enviar os fragmentos da base até `base + 4`, limitados ao último fragmento da mensagem. A janela avançará conforme os ACKs chegarem, liberando o envio de novos fragmentos sem precisar esperar a confirmação de todo o lote.
+As regras a seguir para batch ainda não estão implementadas. A base da janela será o menor número de sequência ainda não confirmado. O cliente poderá enviar os fragmentos da base até `base + 4`, limitados ao último fragmento da mensagem. A janela avançará conforme os ACKs chegarem, liberando o envio de novos fragmentos sem precisar esperar a confirmação de todo o lote.
 
 - Em GBN, `ACK n` confirmará tudo até `n`, inclusive, e a base avançará para `n + 1`, se esse ACK trouxer novas confirmações.
 - Em SR, cada ACK marcará apenas seu fragmento como confirmado. A base avançará pelos fragmentos consecutivos já confirmados; um ACK de sequência maior, sozinho, não permitirá pular uma lacuna.
@@ -243,13 +248,21 @@ Assim, haverá no máximo cinco pacotes pendentes no modo batch, todos dentro da
 
 ### 5.2 Conclusão da mensagem
 
-Ao receber o fragmento com `LAST = 1`, o servidor conhecerá a sequência final, mas só considerará a mensagem completa quando tiver todos os fragmentos de `0` até essa sequência, inclusive, com checksum válido. Deverá remontá-los em ordem, respeitar `MAX_TEXT` caracteres e apresentar o texto original.
+No modo individual, o servidor aceita `LAST = 1` apenas na sequência esperada, depois de ter aceitado todos os fragmentos anteriores. Envia o ACK final e apresenta o texto reconstruído, preservando o conteúdo original. Em seguida, descarta o estado da sessão e volta a aguardar `HELLO`. O servidor atende sessões sequencialmente, sem concorrência.
 
-O cliente só considerará o envio concluído quando tiver confirmação de todos os fragmentos. No modo individual e em SR, isso exigirá um ACK para cada sequência; em GBN, o ACK cumulativo da sequência final confirmará toda a mensagem. Não haverá troca adicional de encerramento: o marcador `LAST` e os ACKs serão suficientes para esse fluxo.
+Na futura recepção em batch, `LAST = 1` informará a sequência final, mas a mensagem só estará completa quando todos os fragmentos de zero até essa sequência tiverem sido recebidos com checksum válido, respeitando `MAX_TEXT`.
+
+O cliente individual só informa a transferência concluída após receber o ACK válido do último fragmento. Na futura transferência em batch, SR exigirá um ACK para cada sequência, enquanto GBN usará o ACK cumulativo da sequência final. Não há mensagem adicional de encerramento: o marcador `LAST` e os ACKs são suficientes para esse fluxo.
+
+### 5.3 Espera e encerramento por timeout
+
+O cliente espera até cinco segundos pelo ACK de cada DATA. Se não receber uma confirmação válida, encerra com status de erro, sem reenviar o pacote. Pacotes inesperados não renovam esse prazo.
+
+O servidor encerra uma sessão individual após cinco segundos sem aceitar o próximo DATA, descarta os fragmentos incompletos e volta a aguardar `HELLO`. Esse prazo também libera uma sessão que tenha feito apenas o handshake, pois o protocolo não informa se o cliente tem texto a enviar. Pacotes inválidos ou de outras origens não renovam a espera. O timeout do socket é removido ao encerrar a sessão para permitir a próxima comunicação.
 
 ---
 
-## 6. Exemplos de preparação e do futuro fluxo de transferência
+## 6. Exemplos de preparação e transferência
 
 ### 6.1 Texto “REDE LOCAL”
 
@@ -261,12 +274,14 @@ Com `MAX_TEXT = 30`, a mensagem de dez caracteres está dentro do limite e é di
 | 1 | `" LOC"` | 4 | 4 | 0 | 12 bytes |
 | 2 | `"AL"` | 2 | 2 | 1 | 10 bytes |
 
-Cada `DATA` preparado usa `TYPE = 0x04` e seu próprio checksum. Na futura transferência, cada ACK usará `TYPE = 0x05`, checksum próprio e tamanho de 6 bytes.
+Cada `DATA` usa `TYPE = 0x04` e seu próprio checksum. Cada ACK usa `TYPE = 0x05`, checksum próprio e tamanho de 6 bytes.
 
-No modo individual, o fluxo será `DATA 0 -> ACK 0`, depois `DATA 1 -> ACK 1` e `DATA 2 -> ACK 2`. Em batch, os três fragmentos caberão na janela de cinco. Em SR, os ACKs 0, 1 e 2 confirmarão os respectivos fragmentos; em GBN, esses mesmos ACKs confirmarão cumulativamente até 0, até 1 e até 2. Ao ter os três fragmentos, o servidor reconstruirá “REDE LOCAL”; o cliente concluirá quando todos estiverem confirmados.
+No modo individual, o fluxo é `DATA 0 -> ACK 0`, depois `DATA 1 -> ACK 1` e `DATA 2 -> ACK 2`. O servidor apresenta “REDE LOCAL” após aceitar DATA 2 e enviar ACK 2; o cliente conclui ao receber esse ACK. Esse fluxo pode ser executado com `python src/client.py --mode individual --text "REDE LOCAL"`.
+
+Na futura transferência em batch, os três fragmentos caberão na janela de cinco. Em SR, os ACKs 0, 1 e 2 confirmarão os respectivos fragmentos; em GBN, esses mesmos ACKs confirmarão cumulativamente até 0, até 1 e até 2.
 
 ### 6.2 Texto com acentos: “AÇÃO”
 
 Usando `Ç` e `Ã` como pontos de código únicos, “AÇÃO” tem quatro caracteres e forma um único fragmento. Em UTF-8, seus bytes são `41 C3 87 C3 83 4F`: `A` e `O` ocupam um byte cada, e `Ç` e `Ã`, dois bytes cada.
 
-Esse `DATA` tem `SEQ = 0`, `LAST = 1` e `LEN = 6`, totalizando 14 bytes com o cabeçalho. Para `MAX_TEXT`, o texto conta como quatro caracteres; para `LEN` e o checksum, o payload tem seis bytes. Na futura transferência, o `ACK 0` confirmará o fragmento nos dois modos.
+Esse `DATA` tem `SEQ = 0`, `LAST = 1` e `LEN = 6`, totalizando 14 bytes com o cabeçalho. Para `MAX_TEXT`, o texto conta como quatro caracteres; para `LEN` e o checksum, o payload tem seis bytes. No modo individual, `ACK 0` confirma o fragmento e conclui a transferência.
