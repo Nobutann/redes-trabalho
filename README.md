@@ -4,9 +4,9 @@ Este projeto faz parte da disciplina de Infraestrutura de Comunicação. O objet
 
 A aplicação divide textos em fragmentos de até quatro caracteres e prepara pacotes com número de sequência, indicador de último fragmento e checksum. No modo individual, envia um fragmento por vez e aguarda seu ACK. Em batch, usa uma janela anunciada pelo servidor, com confirmações cumulativas em Go-Back-N ou individuais em Repetição Seletiva. O servidor reconstrói o texto nos dois modos.
 
-**Estado atual:** Checkpoint 1 concluído. As transferências individual e em batch estão implementadas no caminho sem erros ou perdas, usando o mesmo socket do handshake e o checksum manual de `src/protocol.py`. Os timeouts encerram tentativas sem progresso; ainda não há recuperação por retransmissão.
+**Estado atual:** Código e especificação do CP2 concluídos. As transferências individual e em batch funcionam no caminho sem erros ou perdas, usando o mesmo socket do handshake e o checksum manual de `src/protocol.py`. Os timeouts encerram tentativas sem progresso.
 
-Os formatos de `DATA` e `ACK` e o fluxo de transferência sem erros estão descritos em [`docs/protocolo.md`](docs/protocolo.md). O CP2 permanece pendente da revisão final da especificação e dos requisitos.
+A [especificação do protocolo](docs/protocolo.md) reúne os formatos dos pacotes, os estados da sessão e as regras de confirmação e recuperação. NAK, retransmissões e simulação de falhas estão definidos para implementação no CP3. A cifra de César está prevista para o bônus da entrega final.
 
 ---
 
@@ -15,7 +15,7 @@ Os formatos de `DATA` e `ACK` e o fluxo de transferência sem erros estão descr
 | Marco | Data | Status | Escopo |
 |---|---|---|---|
 | Checkpoint 1 — Handshake & Sockets | 09/09/2026 | Concluído | Conexão UDP e handshake de 3 vias (modo, estratégia, tamanho máximo e janela) |
-| Checkpoint 2 — Protocolo sem erros | 21/10/2026 | Pendente | Definição completa do protocolo e transferência de dados sem erros ou perdas |
+| Checkpoint 2 — Protocolo sem erros | 21/10/2026 | Código e protocolo concluídos | Definição completa do protocolo e transferência de dados sem erros ou perdas |
 | Checkpoint 3 — Erros e perdas | 23/11/2026 | Pendente | Simulação determinística de falhas e recuperação com temporizadores, Go-Back-N e Repetição Seletiva |
 
 ---
@@ -69,15 +69,6 @@ A janela anunciada no `HELLO_ACK` permanece válida durante toda a sessão. O cl
 Em outro terminal, também na pasta do projeto, execute o cliente com os parâmetros desejados:
 
 ```bash
-# Modo individual (padrão)
-python src/client.py --mode individual
-
-# Modo lote com Go-Back-N
-python src/client.py --mode batch --strategy gbn
-
-# Modo lote com Repetição Seletiva e limite de texto igual a 100
-python src/client.py --mode batch --strategy sr --max-text 100
-
 # Transferência individual de três fragmentos
 python src/client.py --mode individual --text "REDE LOCAL"
 
@@ -86,6 +77,9 @@ python src/client.py --mode batch --strategy sr --text "REDE LOCAL"
 
 # Oito fragmentos em batch com Go-Back-N
 python src/client.py --mode batch --strategy gbn --text "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234"
+
+# Apenas o handshake, com limite de texto igual a 100
+python src/client.py --mode batch --strategy sr --max-text 100
 ```
 
 Sem `--text`, o cliente executa apenas o handshake. Com `--text`, valida e prepara os pacotes antes de abrir o socket. Após o handshake, o modo individual envia cada `DATA` e aguarda seu ACK antes de avançar. Em batch, preenche a janela antes de esperar ACKs e envia novos fragmentos conforme a base avança. Em GBN, `ACK n` confirma tudo até `n`; em SR, confirma apenas `n`, e a base só avança pelas confirmações consecutivas. O servidor exibe o texto apenas quando todos os fragmentos tiverem sido recebidos, e o cliente conclui quando todos estiverem confirmados.
@@ -107,28 +101,37 @@ Se mudar a porta do servidor, informe a mesma porta ao cliente com `--port`. Par
 
 ## Exemplo de execução
 
-Ao executar `python src/client.py --mode batch --strategy gbn`, as duas pontas mostram as etapas do handshake e os parâmetros acordados:
+Com o servidor em execução, envie uma mensagem:
+
+```bash
+python src/client.py --mode individual --text "REDE LOCAL"
+```
+
+Depois do handshake, o cliente envia os três fragmentos e recebe suas confirmações:
 
 **Cliente:**
+
 ```
-[CLIENT] HELLO enviado para 127.0.0.1:50000
-  modo: BATCH, estratégia: GBN, max_text: 30
-[CLIENT] HELLO_ACK recebido (window=5)
-[CLIENT] Handshake concluído com 127.0.0.1:50000
-  modo: BATCH, estratégia: GBN, max_text: 30, window: 5
+[CLIENT] Pacotes DATA preparados: 3
+[CLIENT] DATA enviado (seq=0)
+[CLIENT] ACK recebido (seq=0, checksum=0x55FA)
+[CLIENT] DATA enviado (seq=1)
+[CLIENT] ACK recebido (seq=1, checksum=0x55F9)
+[CLIENT] DATA enviado (seq=2)
+[CLIENT] ACK recebido (seq=2, checksum=0x55F8)
+[CLIENT] Transferência concluída: todos os fragmentos confirmados
 ```
 
 **Servidor:**
+
 ```
-[SERVER] Ouvindo em 0.0.0.0:50000
-[SERVER] HELLO recebido de 127.0.0.1:60137
-  modo: BATCH, estratégia: GBN, max_text: 30
-[SERVER] HELLO_ACK enviado (window=5)
-[SERVER] Handshake concluído com 127.0.0.1:60137
-  modo: BATCH, estratégia: GBN, max_text: 30, window: 5
+[SERVER] DATA recebido (seq=0, LAST=0, LEN=4, checksum=0xBF6C)
+[SERVER] DATA recebido (seq=1, LAST=0, LEN=4, checksum=0xE666)
+[SERVER] DATA recebido (seq=2, LAST=1, LEN=2, checksum=0x13AB)
+[SERVER] Mensagem reconstruída: REDE LOCAL
 ```
 
-O registro completo dessa execução está em [`docs/exemplo-handshake.txt`](docs/exemplo-handshake.txt). As regras e os formatos dos pacotes estão em [`docs/protocolo.md`](docs/protocolo.md).
+O espaço entre as palavras faz parte do segundo fragmento e é preservado na reconstrução. O [exemplo de handshake do CP1](docs/exemplo-handshake.txt) continua disponível como registro daquela etapa.
 
 ---
 
