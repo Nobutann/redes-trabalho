@@ -4,9 +4,12 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import Mock, call, patch
 
-from src import protocol
+from src import cipher, protocol
 
 with patch.dict(sys.modules, {"protocol": protocol}):
+    from src import faults
+
+with patch.dict(sys.modules, {"protocol": protocol, "cipher": cipher, "faults": faults}):
     from src import client, server
 
 
@@ -32,7 +35,10 @@ class BatchClientTests(unittest.TestCase):
 
         self.sock.recvfrom.side_effect = reply
         with redirect_stdout(self.output):
-            client.send_batch(self.sock, self.address, self.packets, strategy, window)
+            client.ReliableSender(
+                self.sock, self.address, self.packets, window,
+                strategy is protocol.Strategy.GBN, faults.FaultInjector(),
+            ).run()
         with self.assertRaises(StopIteration):
             next(responses)
         self.assertEqual(self.sock.sendto.call_args_list, [
@@ -118,26 +124,6 @@ class BatchClientTests(unittest.TestCase):
                 self.output.seek(0)
                 self.output.truncate()
 
-    def test_repeated_acks_do_not_extend_wait_or_retransmit(self):
-        for strategy, sent_count in ((protocol.Strategy.GBN, 8), (protocol.Strategy.SR, 5)):
-            with self.subTest(strategy=strategy):
-                self.sock.reset_mock()
-                self.sock.recvfrom.side_effect = [
-                    (protocol.build_ack(2), self.address),
-                    (protocol.build_ack(2), self.address),
-                ]
-                with (
-                    redirect_stdout(self.output),
-                    patch.object(client, "monotonic", side_effect=[10.0, 10.1, 10.2, 10.3, 15.3]),
-                ):
-                    with self.assertRaises(SystemExit) as error:
-                        client.send_batch(self.sock, self.address, self.packets, strategy, 5)
-                self.assertEqual(error.exception.code, 1)
-                self.assertEqual(self.sock.recvfrom.call_count, 2)
-                self.assertEqual([item.args[0] for item in self.sock.sendto.call_args_list],
-                                 self.packets[:sent_count])
-                self.assertNotIn("Transferência concluída", self.output.getvalue())
-
 
 class BatchServerTests(unittest.TestCase):
     def setUp(self):
@@ -148,7 +134,7 @@ class BatchServerTests(unittest.TestCase):
     def receive(self, strategy, window, packets, max_text=30):
         self.sock.recvfrom.side_effect = packets
         with redirect_stdout(self.output):
-            server.receive_batch(self.sock, self.address, max_text, strategy, window)
+            server.receive_message(self.sock, self.address, max_text, protocol.Mode.BATCH, strategy, window)
         self.assertEqual(self.sock.settimeout.call_args, call(None))
 
     def test_in_order_messages_with_all_windows_and_strategies(self):
@@ -167,7 +153,7 @@ class BatchServerTests(unittest.TestCase):
 
     def test_sr_stores_last_before_preceding_fragments_without_completing(self):
         packets = protocol.prepare_data_packets("REDE LOCAL", 30)
-        replies = iter([(0, packets[2]), (1, packets[2]), (1, packets[1]), (2, packets[0])])
+        replies = iter([(0, packets[2]), (1, packets[2]), (2, packets[1]), (3, packets[0])])
 
         def reply(bufsize):
             ack_count, packet = next(replies)
@@ -177,6 +163,7 @@ class BatchServerTests(unittest.TestCase):
 
         self.receive(protocol.Strategy.SR, 3, reply)
         self.assertEqual(self.sock.sendto.call_args_list, [
+            call(protocol.build_ack(2), self.address),
             call(protocol.build_ack(2), self.address),
             call(protocol.build_ack(1), self.address),
             call(protocol.build_ack(0), self.address),
@@ -230,7 +217,7 @@ class BatchServerTests(unittest.TestCase):
             (packets[2], self.address),
         ])
         self.assertEqual(self.sock.sendto.call_args_list, [
-            call(protocol.build_ack(seq), self.address) for seq in (0, 1, 2)
+            call(protocol.build_ack(seq), self.address) for seq in (0, 0, 0, 1, 2)
         ])
         self.assertIn("Mensagem reconstruída: REDE LOCAL\n", self.output.getvalue())
 
@@ -253,7 +240,7 @@ class BatchServerTests(unittest.TestCase):
         self.receive(protocol.Strategy.SR, 5, [
             (packets[index], self.address) for index in (4, 4, 0, 1, 2, 3, 5, 6, 7)
         ])
-        self.assertEqual(self.sock.sendto.call_count, 8)
+        self.assertEqual(self.sock.sendto.call_count, 9)
         self.assertIn(f"Mensagem reconstruída: {'😀' * 30}\n", self.output.getvalue())
 
     def test_excess_is_not_stored_or_acknowledged(self):
@@ -276,9 +263,9 @@ class BatchServerTests(unittest.TestCase):
 
     def test_duplicates_do_not_extend_inactivity_timeout(self):
         packet = protocol.build_data(1, 0, b"REDE")
-        with patch.object(server, "monotonic", side_effect=[10.0, 10.1, 10.2, 10.3, 15.3]):
+        with patch.object(server, "monotonic", side_effect=[10.0, 10.1, 10.2, 35.1, 35.2]):
             self.receive(protocol.Strategy.SR, 3, [(packet, self.address), (packet, self.address)])
-        self.sock.sendto.assert_called_once_with(protocol.build_ack(1), self.address)
+        self.assertEqual(self.sock.sendto.call_args_list, [call(protocol.build_ack(1), self.address)] * 2)
         self.assertEqual(self.sock.recvfrom.call_count, 2)
         self.assertNotIn("Mensagem reconstruída", self.output.getvalue())
 
@@ -293,7 +280,7 @@ class BatchServerTests(unittest.TestCase):
                     (protocol.build_ack(0), self.address),
                     TimeoutError,
                 ])
-                self.sock.sendto.assert_not_called()
+                self.sock.sendto.assert_called_once_with(protocol.build_nak(0), self.address)
                 self.assertNotIn("Mensagem reconstruída", self.output.getvalue())
 
 
@@ -332,7 +319,7 @@ class ServerWindowTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "stop"):
                 server.run_server(0)
-        hello.assert_called_once_with(factory.return_value.__enter__.return_value, 5)
+        hello.assert_called_once_with(factory.return_value.__enter__.return_value, 5, None, None)
 
 
 if __name__ == "__main__":

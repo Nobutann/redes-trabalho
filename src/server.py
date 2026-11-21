@@ -1,16 +1,20 @@
-"""Servidor UDP com handshake e recepção individual ou em batch."""
+"""Servidor UDP com handshake, recepção confiável e respostas a duplicatas."""
 
 import argparse
 import socket
+from dataclasses import dataclass, field
 from time import monotonic
 
+from cipher import decrypt
 from protocol import (
     DEFAULT_PORT,
+    ChecksumError,
     Mode,
     PacketType,
     Strategy,
     build_ack,
     build_hello_ack,
+    build_nak,
     parse_packet,
     validate_window,
 )
@@ -18,21 +22,56 @@ from protocol import (
 WINDOW = 5
 BUFSIZE = 1024
 TIMEOUT = 5.0
+SESSION_TIMEOUT = 25.0
+RETENTION_TIME = 25.0
 
 
-def run_server(port: int, window: int = WINDOW) -> None:
+@dataclass
+class CompletedSession:
+    """Sessão concluída mantida para reenviar ACKs de duplicatas."""
+
+    addr: tuple[str, int]
+    received: dict[int, bytes]
+    cumulative: bool
+    last_seq: int
+    expires_at: float = field(default_factory=lambda: monotonic() + RETENTION_TIME)
+
+    def ack_for(self, data: bytes) -> int | None:
+        """Retorna o ACK a reenviar se ``data`` for cópia exata de um DATA aceito."""
+        seq = int.from_bytes(data[2:4], byteorder="big")
+        if self.received.get(seq) != data:
+            return None
+        return self.last_seq if self.cumulative else seq
+
+
+def run_server(port: int, window: int = WINDOW, key: int | None = None) -> None:
     validate_window(window)
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.bind(("0.0.0.0", port))
         print(f"[SERVER] Ouvindo em 0.0.0.0:{sock.getsockname()[1]}")
 
+        completed = None
         while True:
-            await_hello(sock, window)
+            completed = await_hello(sock, window, completed, key)
 
 
-def await_hello(sock: socket.socket, window: int = WINDOW) -> None:
+def await_hello(
+    sock: socket.socket,
+    window: int = WINDOW,
+    completed: CompletedSession | None = None,
+    key: int | None = None,
+) -> CompletedSession | None:
     while True:
         data, addr = sock.recvfrom(BUFSIZE)
+
+        if completed is not None and monotonic() >= completed.expires_at:
+            completed = None
+        if completed is not None and addr == completed.addr:
+            ack_seq = completed.ack_for(data)
+            if ack_seq is not None:
+                sock.sendto(build_ack(ack_seq), addr)
+                print(f"[SERVER] Duplicata de sessão concluída; ACK {ack_seq} reenviado")
+            continue
 
         try:
             pkt = parse_packet(data)
@@ -55,12 +94,9 @@ def await_hello(sock: socket.socket, window: int = WINDOW) -> None:
         sock.sendto(ack, addr)
         print(f"[SERVER] HELLO_ACK enviado (window={window})")
 
-        if await_ready(sock, addr, mode, strategy, max_text, window):
-            if mode is Mode.INDIVIDUAL:
-                receive_individual(sock, addr, max_text)
-            else:
-                receive_batch(sock, addr, max_text, strategy, window)
-        return
+        if not await_ready(sock, addr, mode, strategy, max_text, window):
+            return completed
+        return receive_message(sock, addr, max_text, mode, strategy, window, key)
 
 
 def await_ready(
@@ -75,23 +111,17 @@ def await_ready(
     try:
         while True:
             try:
-                remaining = deadline - monotonic()
-                if remaining <= 0:
-                    raise TimeoutError
-                sock.settimeout(remaining)
-                data, addr = sock.recvfrom(BUFSIZE)
+                data = receive_from(sock, expected_addr, deadline)
             except TimeoutError:
                 print(f"[SERVER] Timeout: READY não recebido de {expected_addr}; handshake interrompido")
                 return False
-
-            if addr != expected_addr:
-                print(f"[SERVER] Pacote de endereço inesperado {addr} ignorado")
+            if data is None:
                 continue
 
             try:
                 pkt = parse_packet(data)
             except ValueError as exc:
-                print(f"[SERVER] Pacote malformado recebido de {addr}: {exc}")
+                print(f"[SERVER] Pacote malformado recebido de {expected_addr}: {exc}")
                 continue
 
             if pkt["type"] is not PacketType.READY:
@@ -105,46 +135,7 @@ def await_ready(
         sock.settimeout(None)
 
 
-def receive_individual(sock: socket.socket, expected_addr: tuple[str, int], max_text: int) -> None:
-    fragments = []
-    text_length = 0
-    expected_seq = 0
-    deadline = monotonic() + TIMEOUT
-    try:
-        while True:
-            try:
-                pkt = receive_data(sock, expected_addr, deadline)
-            except TimeoutError:
-                print(f"[SERVER] Timeout: DATA {expected_seq} não recebido de {expected_addr}; sessão encerrada")
-                return
-
-            if pkt is None:
-                continue
-
-            seq = pkt["seq"]
-            if seq != expected_seq:
-                print(f"[SERVER] Sequência inesperada: esperado {expected_seq}, recebido {seq}")
-                continue
-
-            fragment = pkt["payload"].decode("utf-8")
-            if text_length + len(fragment) > max_text:
-                print(f"[SERVER] Limite de {max_text} caracteres excedido; DATA {seq} ignorado")
-                continue
-
-            fragments.append(fragment)
-            text_length += len(fragment)
-            sock.sendto(build_ack(seq), expected_addr)
-            if pkt["last"] == 1:
-                print(f"[SERVER] Mensagem reconstruída: {''.join(fragments)}")
-                return
-
-            expected_seq += 1
-            deadline = monotonic() + TIMEOUT
-    finally:
-        sock.settimeout(None)
-
-
-def receive_data(sock: socket.socket, expected_addr: tuple[str, int], deadline: float) -> dict | None:
+def receive_from(sock: socket.socket, expected_addr: tuple[str, int], deadline: float) -> bytes | None:
     remaining = deadline - monotonic()
     if remaining <= 0:
         raise TimeoutError
@@ -153,75 +144,109 @@ def receive_data(sock: socket.socket, expected_addr: tuple[str, int], deadline: 
     if addr != expected_addr:
         print(f"[SERVER] Pacote de endereço inesperado {addr} ignorado")
         return None
-    try:
-        pkt = parse_packet(data)
-    except ValueError as exc:
-        print(f"[SERVER] Pacote malformado recebido de {addr}: {exc}")
-        return None
-    if pkt["type"] is not PacketType.DATA:
-        print(f"[SERVER] Esperado DATA, recebido {pkt['type'].name}")
-        return None
-    print(f"[SERVER] DATA recebido (seq={pkt['seq']}, LAST={pkt['last']}, "
-          f"LEN={pkt['length']}, checksum=0x{pkt['checksum']:04X})")
-    return pkt
+    return data
 
 
-def receive_batch(
+def receive_message(
     sock: socket.socket,
-    expected_addr: tuple[str, int],
+    client_addr: tuple[str, int],
     max_text: int,
+    mode: Mode,
     strategy: Strategy,
     window: int,
-) -> None:
-    if strategy is Strategy.GBN:
-        # Confirmar cada sequência contígua aceita também produz ACKs cumulativos.
-        receive_individual(sock, expected_addr, max_text)
-        return
+    key: int | None = None,
+) -> CompletedSession | None:
+    """Recebe os fragmentos de uma mensagem e retorna a sessão concluída, ou None no timeout.
 
+    Em GBN os ACKs são cumulativos e só a próxima sequência é aceita. Em SR, fragmentos
+    dentro da janela são aceitos fora de ordem. O modo individual se comporta como SR
+    com janela 1.
+    """
+    cumulative = mode is Mode.BATCH and strategy is Strategy.GBN
+    receive_window = window if mode is Mode.BATCH and strategy is Strategy.SR else 1
+    received = {}
     fragments = {}
     text_length = 0
     base = 0
     last_seq = None
-    deadline = monotonic() + TIMEOUT
+
+    def send_ack(seq: int) -> None:
+        sock.sendto(build_ack(seq), client_addr)
+        print(f"[SERVER] ACK {seq} enviado")
+
+    deadline = monotonic() + SESSION_TIMEOUT
     try:
         while True:
             try:
-                pkt = receive_data(sock, expected_addr, deadline)
+                data = receive_from(sock, client_addr, deadline)
             except TimeoutError:
-                print(f"[SERVER] Timeout: DATA {base} não recebido de {expected_addr}; sessão encerrada")
-                return
-            if pkt is None:
+                print(f"[SERVER] Timeout: DATA {base} não recebido de {client_addr}; sessão encerrada")
+                return None
+            if data is None:
+                continue
+
+            try:
+                pkt = parse_packet(data)
+            except ChecksumError as exc:
+                if data[1] == PacketType.DATA:
+                    print(f"[SERVER] {exc}; NAK {base} enviado")
+                    sock.sendto(build_nak(base), client_addr)
+                continue
+            except ValueError as exc:
+                print(f"[SERVER] Pacote malformado recebido de {client_addr}: {exc}")
+                continue
+            if pkt["type"] is not PacketType.DATA:
+                print(f"[SERVER] Esperado DATA, recebido {pkt['type'].name}")
                 continue
 
             seq = pkt["seq"]
-            if not (base <= seq < base + window) or seq in fragments:
-                print(f"[SERVER] DATA {seq} fora da janela ou já recebido ignorado (base={base})")
+            print(f"[SERVER] DATA recebido (seq={seq}, LAST={pkt['last']}, "
+                  f"LEN={pkt['length']}, checksum=0x{pkt['checksum']:04X})")
+
+            if received.get(seq) == data:
+                print(f"[SERVER] DATA {seq} duplicado")
+                send_ack(base - 1 if cumulative else seq)
+                continue
+            if not (base <= seq < base + receive_window) or seq in received:
+                print(f"[SERVER] DATA {seq} fora da janela ou já recebido descartado (base={base})")
+                if cumulative and base > 0:
+                    send_ack(base - 1)
                 continue
             if last_seq is not None and (seq > last_seq or pkt["last"] == 1):
-                print(f"[SERVER] DATA {seq} incompatível com LAST {last_seq} ignorado")
+                print(f"[SERVER] DATA {seq} incompatível com LAST {last_seq} descartado")
                 continue
-            if pkt["last"] == 1 and any(received > seq for received in fragments):
-                print(f"[SERVER] LAST {seq} anterior a fragmento já recebido ignorado")
+            if pkt["last"] == 1 and any(stored > seq for stored in received):
+                print(f"[SERVER] LAST {seq} anterior a fragmento já recebido descartado")
                 continue
 
             fragment = pkt["payload"].decode("utf-8")
             if text_length + len(fragment) > max_text:
-                print(f"[SERVER] Limite de {max_text} caracteres excedido; DATA {seq} ignorado")
+                print(f"[SERVER] Limite de {max_text} caracteres excedido; DATA {seq} descartado")
                 continue
+
+            received[seq] = data
             fragments[seq] = fragment
             text_length += len(fragment)
             if pkt["last"] == 1:
                 last_seq = seq
-            while base in fragments:
+            while base in received:
                 base += 1
-            sock.sendto(build_ack(seq), expected_addr)
+            send_ack(base - 1 if cumulative else seq)
+
             if last_seq is not None and base > last_seq:
-                text = "".join(fragments[index] for index in range(last_seq + 1))
-                print(f"[SERVER] Mensagem reconstruída: {text}")
-                return
-            deadline = monotonic() + TIMEOUT
+                show_message("".join(fragments[index] for index in range(last_seq + 1)), key)
+                return CompletedSession(client_addr, received, cumulative, last_seq)
+            deadline = monotonic() + SESSION_TIMEOUT
     finally:
         sock.settimeout(None)
+
+
+def show_message(text: str, key: int | None) -> None:
+    if key is None:
+        print(f"[SERVER] Mensagem reconstruída: {text}")
+        return
+    print(f"[SERVER] Texto cifrado recebido: {text}")
+    print(f"[SERVER] Mensagem reconstruída: {decrypt(text, key)}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -239,9 +264,16 @@ def parse_args() -> argparse.Namespace:
         default=WINDOW,
         help=f"Janela de recepção, de 1 a 5 (padrão: {WINDOW})",
     )
+    parser.add_argument(
+        "--key",
+        type=int,
+        choices=range(1, 26),
+        metavar="1-25",
+        help="Chave da cifra de César; deve ser a mesma configurada no cliente",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    run_server(args.port, args.window)
+    run_server(args.port, args.window, args.key)

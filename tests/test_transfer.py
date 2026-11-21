@@ -42,7 +42,7 @@ class TransferIntegrationTests(unittest.TestCase):
         self.addCleanup(self.stop_server)
         self.start_server()
 
-    def start_server(self, window=5):
+    def start_server(self, window=5, *extra_args):
         if self.server is not None:
             self.stop_server()
         self.window = window
@@ -50,8 +50,9 @@ class TransferIntegrationTests(unittest.TestCase):
         self.output = queue.Queue()
         self.server = subprocess.Popen(
             [sys.executable, "-u", "-c",
-             "import server; server.TIMEOUT = 1.0; args = server.parse_args(); "
-             "server.run_server(args.port, args.window)", "--port", "0", "--window", str(window)],
+             "import server; server.TIMEOUT = 1.0; server.SESSION_TIMEOUT = 1.0; "
+             "args = server.parse_args(); server.run_server(args.port, args.window, args.key)",
+             "--port", "0", "--window", str(window), *extra_args],
             cwd=ROOT / "src", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
         self.reader = threading.Thread(target=self.read_output, daemon=True)
@@ -91,6 +92,57 @@ class TransferIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
+
+    def run_client_with_faults(self, mode, strategy, text, faults):
+        code = (
+            "import client, faults; client.TIMEOUT = 0.3; "
+            f"rules = faults.parse_fault_rules({faults!r}); "
+            f"client.run_client('localhost', {self.address[1]}, client.Mode.{mode}, "
+            f"client.Strategy.{strategy}, 30, {text!r}, faults.FaultInjector(rules))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code], cwd=ROOT / "src", capture_output=True, text=True, timeout=WAIT,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Transferência concluída", result.stdout)
+        return result.stdout
+
+    def test_recovers_from_simulated_faults(self):
+        text = "ABCDEFGHIJKLMNOPQRST"
+        cases = (
+            ("INDIVIDUAL", "GBN", ["DATA:1:1:perder"], "retransmitido por timeout (seq=1"),
+            ("INDIVIDUAL", "SR", ["DATA:1:1:corromper"], "retransmitido por NAK (seq=1"),
+            ("BATCH", "GBN", ["DATA:1:1:perder"], "retransmitido por timeout (seq=4"),
+            ("BATCH", "GBN", ["DATA:2:1:corromper"], "retransmitido por NAK (seq=2"),
+            ("BATCH", "SR", ["DATA:1:1:perder"], "retransmitido por timeout (seq=1"),
+            ("BATCH", "SR", ["DATA:3:1:corromper", "NAK:3:1:perder"], "retransmitido por timeout (seq=3"),
+            ("BATCH", "SR", ["ACK:4:1:perder"], "retransmitido por timeout (seq=4"),
+            ("BATCH", "GBN", ["ACK:4:1:corromper"], "retransmitido por timeout (seq=4"),
+        )
+        for mode, strategy, faults, expected in cases:
+            with self.subTest(mode=mode, strategy=strategy, faults=faults):
+                output = self.run_client_with_faults(mode, strategy, text, faults)
+                self.assertIn(expected, output)
+                self.assert_message(text)
+
+    def test_duplicate_after_completion_is_acknowledged_again(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            self.open_session(sock)
+            packet = build_data(0, 1, b"A")
+            sock.sendto(packet, self.address)
+            self.assertEqual(sock.recvfrom(1024)[0], build_ack(0))
+            self.assert_message("A")
+            sock.sendto(packet, self.address)
+            self.assertEqual(sock.recvfrom(1024)[0], build_ack(0))
+        self.wait_for_line("[SERVER] Duplicata de sessão concluída; ACK 0 reenviado")
+        self.assertEqual(sum("Mensagem reconstruída" in line for line in self.lines), 1)
+
+    def test_caesar_cipher_end_to_end(self):
+        self.start_server(5, "--key", "3")
+        output = self.run_client("--text", "REDE LOCAL", "--key", "3")
+        self.assertIn("UHGH ORFDO", output)
+        self.wait_for_line("[SERVER] Texto cifrado recebido: UHGH ORFDO")
+        self.assert_message("REDE LOCAL")
 
     def open_session(self, sock, mode=Mode.INDIVIDUAL, strategy=Strategy.GBN):
         sock.settimeout(WAIT)
@@ -219,7 +271,7 @@ class TransferIntegrationTests(unittest.TestCase):
             sock.sendto(build_data(0, 0, b"REDE"), self.address)
             self.assertEqual(sock.recvfrom(1024)[0], build_ack(0))
             sock.sendto(build_data(2, 1, b"AL"), self.address)
-            self.wait_for_line("[SERVER] Sequência inesperada: esperado 1, recebido 2")
+            self.wait_for_line("[SERVER] DATA 2 fora da janela")
             sock.settimeout(0.1)
             with self.assertRaises(TimeoutError):
                 sock.recvfrom(1024)
@@ -318,18 +370,19 @@ class ClientUDPIntegrationTests(unittest.TestCase):
         self.sock.sendto(build_ack(6), self.address)
         self.finish_client()
 
-    def test_batch_absent_ack_times_out_without_retransmitting(self):
-        for strategy in ("gbn", "sr"):
+    def test_batch_timeout_retransmits_by_strategy(self):
+        for strategy, expected in (("gbn", [3, 4]), ("sr", [0, 1, 3, 4])):
             with self.subTest(strategy=strategy):
                 self.start_client(timeout=0.3, mode="batch", strategy=strategy,
-                                  text="ABCDEFGHIJKLMNOPQRSTUVWXYZ1234")
+                                  text="ABCDEFGHIJKLMNOPQRST")
                 for seq in (1, 2, 3, 4):
                     self.receive_data(seq)
-                output, _ = self.client.communicate(timeout=WAIT)
-                self.assertEqual(self.client.returncode, 1, output)
-                self.assertIn("Timeout: sem novas confirmações", output)
-                self.assertNotIn("Transferência concluída", output)
-                self.assert_no_next_data()
+                self.sock.sendto(build_ack(2), self.address)
+                for seq in expected:
+                    self.receive_data(seq)
+                for seq in range(5):
+                    self.sock.sendto(build_ack(seq), self.address)
+                self.finish_client()
 
     def assert_no_next_data(self):
         self.sock.settimeout(0.1)
@@ -354,11 +407,13 @@ class ClientUDPIntegrationTests(unittest.TestCase):
         self.assertIn("Transferência concluída", output)
         self.assert_no_next_data()
 
-    def test_absent_ack_exits_with_error_without_retransmission(self):
+    def test_absent_ack_exits_after_three_retransmissions(self):
         self.start_client(timeout=0.3)
+        for _ in range(3):
+            self.receive_data(0)
         output, _ = self.client.communicate(timeout=WAIT)
         self.assertEqual(self.client.returncode, 1, output)
-        self.assertIn("Timeout: ACK 0 não recebido", output)
+        self.assertIn("Falha: DATA 0 sem confirmação após 3 retransmissões", output)
         self.assertNotIn("Transferência concluída", output)
         self.assert_no_next_data()
 

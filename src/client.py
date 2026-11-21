@@ -1,10 +1,12 @@
-"""Cliente UDP com handshake e transferência individual ou em batch."""
+"""Cliente UDP com handshake, transferência confiável e simulação de falhas."""
 
 import argparse
 import socket
 import sys
 from time import monotonic
 
+from cipher import encrypt
+from faults import FaultInjector, parse_fault_rules
 from protocol import (
     DEFAULT_PORT,
     Mode,
@@ -18,6 +20,7 @@ from protocol import (
 
 BUFSIZE = 1024
 TIMEOUT = 5.0
+MAX_RETRANSMISSIONS = 3
 
 
 def run_client(
@@ -27,9 +30,14 @@ def run_client(
     strategy: Strategy,
     max_text: int,
     text: str | None = None,
+    faults: FaultInjector | None = None,
+    key: int | None = None,
 ) -> None:
     hello = build_hello(mode, strategy, max_text)
-    data_packets = prepare_data_packets(text, max_text) if text is not None else None
+    data_packets = None
+    if text is not None:
+        sent_text = encrypt(text, key) if key is not None else text
+        data_packets = prepare_data_packets(sent_text, max_text)
     server_addr = (socket.gethostbyname(host), port)
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -70,100 +78,186 @@ def run_client(
 
         if data_packets is not None:
             print(f"[CLIENT] Pacotes DATA preparados: {len(data_packets)}")
-            if mode is Mode.INDIVIDUAL:
-                send_individual(sock, server_addr, data_packets)
+            if key is not None:
+                print(f"[CLIENT] Texto cifrado com César (chave={key}): {sent_text}")
+            batch = mode is Mode.BATCH
+            sender = ReliableSender(
+                sock,
+                server_addr,
+                data_packets,
+                window=window if batch else 1,
+                cumulative=batch and strategy is Strategy.GBN,
+                faults=faults or FaultInjector(),
+            )
+            sender.run()
+
+
+class ReliableSender:
+    """Envia DATA com janela deslizante e retransmissão por timeout ou NAK.
+
+    Com ``cumulative`` verdadeiro, segue Go-Back-N: ACKs cumulativos e um único temporizador
+    para a base. Caso contrário, segue Repetição Seletiva, com um temporizador por pacote.
+    O modo individual equivale à Repetição Seletiva com janela 1.
+    """
+
+    def __init__(
+        self,
+        sock: socket.socket,
+        server_addr: tuple[str, int],
+        packets: list[bytes],
+        window: int,
+        cumulative: bool,
+        faults: FaultInjector,
+    ):
+        self.sock = sock
+        self.server_addr = server_addr
+        self.packets = packets
+        self.window = window
+        self.cumulative = cumulative
+        self.faults = faults
+        self.base = 0
+        self.next_seq = 0
+        self.acked = set()
+        self.attempts = [0] * len(packets)
+        self.timers = {}
+        self.nak_answered = set()
+
+    def run(self) -> None:
+        while self.base < len(self.packets):
+            self.fill_window()
+            try:
+                pkt = receive_reply(self.sock, self.server_addr, min(self.timers.values()), self.faults)
+            except TimeoutError:
+                self.on_timeout()
+                continue
+            if pkt is None:
+                continue
+            if pkt["type"] is PacketType.ACK:
+                self.on_ack(pkt["seq"])
             else:
-                send_batch(sock, server_addr, data_packets, strategy, window)
+                self.on_nak(pkt["seq"])
+        print("[CLIENT] Transferência concluída: todos os fragmentos confirmados")
 
+    def fill_window(self) -> None:
+        while self.next_seq < min(self.base + self.window, len(self.packets)):
+            self.transmit(self.next_seq)
+            self.next_seq += 1
+            if self.cumulative and not self.timers:
+                self.restart_base_timer()
 
-def send_individual(sock: socket.socket, server_addr: tuple[str, int], packets: list[bytes]) -> None:
-    for seq, packet in enumerate(packets):
-        sock.sendto(packet, server_addr)
-        print(f"[CLIENT] DATA enviado (seq={seq})")
-        await_ack(sock, server_addr, seq)
-    print("[CLIENT] Transferência concluída: todos os fragmentos confirmados")
-
-
-def await_ack(sock: socket.socket, server_addr: tuple[str, int], expected_seq: int) -> None:
-    deadline = monotonic() + TIMEOUT
-    while True:
-        try:
-            pkt = receive_ack(sock, server_addr, deadline)
-        except TimeoutError:
-            print(f"[CLIENT] Timeout: ACK {expected_seq} não recebido após {TIMEOUT:.0f}s")
+    def transmit(self, seq: int, reason: str | None = None) -> None:
+        if self.attempts[seq] > MAX_RETRANSMISSIONS:
+            print(f"[CLIENT] Falha: DATA {seq} sem confirmação após {MAX_RETRANSMISSIONS} retransmissões")
             sys.exit(1)
+        self.attempts[seq] += 1
+        action = "enviado" if reason is None else f"retransmitido por {reason}"
+        print(f"[CLIENT] DATA {action} (seq={seq}, tentativa={self.attempts[seq]})")
 
-        if pkt is None:
-            continue
-        if pkt["seq"] != expected_seq:
-            print(f"[CLIENT] Sequência inesperada: esperado {expected_seq}, recebido {pkt['seq']}")
-            continue
-        return
+        packet = self.faults.apply(PacketType.DATA, seq, self.packets[seq])
+        if packet is not None:
+            self.sock.sendto(packet, self.server_addr)
+        if not self.cumulative:
+            self.timers[seq] = monotonic() + TIMEOUT
+
+    def restart_base_timer(self) -> None:
+        self.timers = {self.base: monotonic() + TIMEOUT}
+
+    def resend_window(self, reason: str) -> None:
+        for seq in range(self.base, self.next_seq):
+            self.transmit(seq, reason)
+        self.restart_base_timer()
+
+    def on_timeout(self) -> None:
+        now = monotonic()
+        expired = sorted(seq for seq, deadline in self.timers.items() if deadline <= now)
+        if expired and self.cumulative:
+            print(f"[CLIENT] Timeout da base {self.base}")
+            self.nak_answered.clear()
+            self.resend_window("timeout")
+            return
+
+        for seq in expired:
+            print(f"[CLIENT] Timeout de DATA {seq}")
+            self.nak_answered.discard(seq)
+            self.transmit(seq, "timeout")
+
+    def on_ack(self, seq: int) -> None:
+        if not (self.base <= seq < self.next_seq) or seq in self.acked:
+            print(f"[CLIENT] ACK {seq} sem nova confirmação ignorado")
+            return
+
+        if self.cumulative:
+            self.base = seq + 1
+            self.nak_answered.clear()
+            if self.base < self.next_seq:
+                self.restart_base_timer()
+            else:
+                self.timers.clear()
+        else:
+            self.acked.add(seq)
+            del self.timers[seq]
+            self.nak_answered.discard(seq)
+            if seq != self.base:
+                return
+            while self.base in self.acked:
+                self.acked.remove(self.base)
+                self.base += 1
+        print(f"[CLIENT] Janela avançou (base={self.base}, window={self.window})")
+
+    def on_nak(self, seq: int) -> None:
+        if not (self.base <= seq < self.next_seq) or seq in self.acked:
+            print(f"[CLIENT] NAK {seq} fora das sequências pendentes ignorado")
+            return
+
+        # Em GBN o reenvio sempre parte da base, então um NAK atendido vale para ela.
+        answered = self.base if self.cumulative else seq
+        if answered in self.nak_answered:
+            print(f"[CLIENT] NAK {seq} ignorado: reenvio já realizado, aguardando resposta")
+            return
+        self.nak_answered.add(answered)
+
+        if self.cumulative:
+            self.resend_window("NAK")
+        else:
+            self.transmit(seq, "NAK")
 
 
-def receive_ack(sock: socket.socket, server_addr: tuple[str, int], deadline: float) -> dict | None:
-    remaining = deadline - monotonic()
-    if remaining <= 0:
-        raise TimeoutError
-    sock.settimeout(remaining)
-    data, addr = sock.recvfrom(BUFSIZE)
+def receive_reply(
+    sock: socket.socket,
+    server_addr: tuple[str, int],
+    deadline: float,
+    faults: FaultInjector,
+) -> dict | None:
+    """Aguarda um ACK ou NAK válido até o prazo; retorna None para respostas descartadas."""
+    # Com prazo vencido, a leitura não bloqueia e processa respostas que já chegaram.
+    sock.settimeout(max(deadline - monotonic(), 0))
+    try:
+        data, addr = sock.recvfrom(BUFSIZE)
+    except BlockingIOError:
+        raise TimeoutError from None
+
     if addr != server_addr:
         print(f"[CLIENT] Pacote de endereço inesperado {addr} ignorado")
         return None
     try:
         pkt = parse_packet(data)
     except ValueError as exc:
-        print(f"[CLIENT] Pacote malformado recebido: {exc}")
+        print(f"[CLIENT] Pacote descartado: {exc}")
         return None
-    if pkt["type"] is not PacketType.ACK:
-        print(f"[CLIENT] Esperado ACK, recebido {pkt['type'].name}")
+    if pkt["type"] not in (PacketType.ACK, PacketType.NAK):
+        print(f"[CLIENT] Esperado ACK ou NAK, recebido {pkt['type'].name}")
         return None
-    print(f"[CLIENT] ACK recebido (seq={pkt['seq']}, checksum=0x{pkt['checksum']:04X})")
+
+    data = faults.apply(pkt["type"], pkt["seq"], data)
+    if data is None:
+        return None
+    try:
+        pkt = parse_packet(data)
+    except ValueError as exc:
+        print(f"[CLIENT] Pacote descartado: {exc}")
+        return None
+    print(f"[CLIENT] {pkt['type'].name} recebido (seq={pkt['seq']}, checksum=0x{pkt['checksum']:04X})")
     return pkt
-
-
-def send_batch(
-    sock: socket.socket,
-    server_addr: tuple[str, int],
-    packets: list[bytes],
-    strategy: Strategy,
-    window: int,
-) -> None:
-    base = 0
-    next_seq = 0
-    confirmed = set()
-    deadline = monotonic() + TIMEOUT
-    while base < len(packets):
-        while next_seq < min(base + window, len(packets)):
-            sock.sendto(packets[next_seq], server_addr)
-            print(f"[CLIENT] DATA enviado (seq={next_seq})")
-            next_seq += 1
-
-        try:
-            pkt = receive_ack(sock, server_addr, deadline)
-        except TimeoutError:
-            print(f"[CLIENT] Timeout: sem novas confirmações após {TIMEOUT:.0f}s (base={base})")
-            sys.exit(1)
-        if pkt is None:
-            continue
-
-        seq = pkt["seq"]
-        if not (base <= seq < next_seq) or seq in confirmed:
-            print(f"[CLIENT] ACK {seq} sem nova confirmação ignorado")
-            continue
-
-        previous_base = base
-        if strategy is Strategy.GBN:
-            base = seq + 1
-        else:
-            confirmed.add(seq)
-            while base in confirmed:
-                confirmed.remove(base)
-                base += 1
-        if base != previous_base:
-            print(f"[CLIENT] Janela avançou (base={base}, window={window})")
-        deadline = monotonic() + TIMEOUT
-    print("[CLIENT] Transferência concluída: todos os fragmentos confirmados")
 
 
 def parse_args() -> argparse.Namespace:
@@ -198,6 +292,20 @@ def parse_args() -> argparse.Namespace:
         "--text",
         help="Texto para transferir no modo individual ou em batch",
     )
+    parser.add_argument(
+        "--fault",
+        action="append",
+        default=[],
+        metavar="TIPO:SEQ:OCORRÊNCIA:AÇÃO",
+        help="Falha simulada, como DATA:1:1:perder ou ACK:2:1:corromper; pode ser repetida",
+    )
+    parser.add_argument(
+        "--key",
+        type=int,
+        choices=range(1, 26),
+        metavar="1-25",
+        help="Chave da cifra de César; deve ser a mesma configurada no servidor",
+    )
     return parser.parse_args()
 
 
@@ -208,7 +316,8 @@ if __name__ == "__main__":
     strategy = Strategy.GBN if args.strategy == "gbn" else Strategy.SR
 
     try:
-        run_client(args.host, args.port, mode, strategy, args.max_text, args.text)
+        faults = FaultInjector(parse_fault_rules(args.fault))
+        run_client(args.host, args.port, mode, strategy, args.max_text, args.text, faults, args.key)
     except ValueError as exc:
         print(f"[CLIENT] Erro: {exc}")
         sys.exit(1)

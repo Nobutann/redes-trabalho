@@ -7,7 +7,10 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import call, patch
 
-from src import protocol
+from src import cipher, protocol
+
+with patch.dict(sys.modules, {"protocol": protocol}):
+    from src import faults
 
 
 CLIENT_PATH = Path(__file__).resolve().parents[1] / "src" / "client.py"
@@ -25,7 +28,7 @@ class ClientTests(unittest.TestCase):
     def run_cli(self, *args):
         with (
             patch.object(sys, "argv", [str(CLIENT_PATH), *args]),
-            patch.dict(sys.modules, {"protocol": protocol}),
+            patch.dict(sys.modules, {"protocol": protocol, "cipher": cipher, "faults": faults}),
             redirect_stdout(self.output),
         ):
             runpy.run_path(str(CLIENT_PATH), run_name="__main__")
@@ -199,28 +202,47 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(self.sock.sendto.call_args, call(protocol.build_data(0, 1, b"A"), address))
         self.assertIn("[CLIENT] Transferência concluída", self.output.getvalue())
 
-    def test_ack_timeout_exits_without_retransmission(self):
-        self.sock.recvfrom.side_effect = [self.sock.recvfrom.return_value, TimeoutError]
-        with self.assertRaises(SystemExit) as error:
-            self.run_cli("--text", "REDES")
-        self.assertEqual(error.exception.code, 1)
-        self.assertEqual(self.sock.sendto.call_count, 3)
-        self.assertIn("[CLIENT] Timeout: ACK 0 não recebido", self.output.getvalue())
-        self.assertNotIn("Transferência concluída", self.output.getvalue())
-        self.socket_factory.return_value.__exit__.assert_called_once()
-
-    def test_invalid_packets_do_not_extend_ack_wait(self):
-        self.sock.recvfrom.side_effect = [
-            self.sock.recvfrom.return_value,
-            (protocol.build_ack(1), ("127.0.0.1", 50000)),
-        ]
-        with patch("time.monotonic", side_effect=[10.0, 10.1, 15.1]):
+    def test_ack_timeout_retransmits_until_attempts_are_exhausted(self):
+        clock = iter([0.0, 0.0] + [5.0 * attempt for attempt in range(1, 5) for _ in range(3)])
+        self.sock.recvfrom.side_effect = [self.sock.recvfrom.return_value] + [BlockingIOError] * 4
+        with patch("time.monotonic", side_effect=lambda: next(clock)):
             with self.assertRaises(SystemExit) as error:
                 self.run_cli("--text", "REDES")
         self.assertEqual(error.exception.code, 1)
-        self.assertEqual(self.sock.recvfrom.call_count, 2)
-        self.assertEqual(self.sock.sendto.call_count, 3)
+        self.assertEqual(self.sock.sendto.call_args_list[2:], [
+            call(protocol.build_data(0, 0, b"REDE"), ("127.0.0.1", 50000)),
+        ] * 4)
+        self.assertIn("Falha: DATA 0 sem confirmação após 3 retransmissões", self.output.getvalue())
         self.assertNotIn("Transferência concluída", self.output.getvalue())
+        self.socket_factory.return_value.__exit__.assert_called_once()
+
+    def test_fault_rules_are_applied(self):
+        self.set_acks(1)
+        self.sock.recvfrom.side_effect = [
+            (protocol.build_hello_ack(5), ("127.0.0.1", 50000)),
+            (protocol.build_nak(0), ("127.0.0.1", 50000)),
+            (protocol.build_ack(0), ("127.0.0.1", 50000)),
+        ]
+        self.run_cli("--text", "A", "--fault", "DATA:0:1:corromper")
+        corrupted, original = (item.args[0] for item in self.sock.sendto.call_args_list[2:])
+        self.assertEqual(original, protocol.build_data(0, 1, b"A"))
+        self.assertNotEqual(corrupted, original)
+        self.assertIn("[FAULT] corromper DATA 0 (ocorrência 1)", self.output.getvalue())
+        self.assertIn("DATA retransmitido por NAK (seq=0, tentativa=2)", self.output.getvalue())
+
+    def test_invalid_fault_rule_opens_no_socket(self):
+        with self.assertRaises(SystemExit) as error:
+            self.run_cli("--text", "A", "--fault", "DATA:0:1:atrasar")
+        self.assertEqual(error.exception.code, 1)
+        self.socket_factory.assert_not_called()
+        self.assertIn("Ação de falha inválida", self.output.getvalue())
+
+    def test_key_encrypts_text_before_fragmentation(self):
+        self.set_acks(3)
+        self.run_cli("--text", "REDE LOCAL", "--key", "3")
+        sent = [item.args[0] for item in self.sock.sendto.call_args_list[2:]]
+        self.assertEqual(sent, protocol.prepare_data_packets("UHGH ORFDO", 30))
+        self.assertIn("Texto cifrado com César (chave=3): UHGH ORFDO", self.output.getvalue())
 
     def test_incomplete_handshake_sends_no_data(self):
         cases = (
