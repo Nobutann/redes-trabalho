@@ -1,8 +1,8 @@
 # Especificação do protocolo
 
-Este documento define o protocolo do projeto. O CP2 implementa o handshake, o checksum manual e a transferência de texto sem erros ou perdas, nos modos individual e batch, com confirmações GBN ou SR. As regras de recuperação também estão definidas aqui, mas sua implementação pertence ao CP3.
+Este documento define o protocolo do projeto: handshake, transferência de texto nos modos individual e batch, confirmações GBN ou SR, checksum manual, recuperação de erros e perdas, simulação determinística de falhas e a cifra de César opcional. Tudo o que está descrito aqui está implementado.
 
-As seções 1 a 6 descrevem o funcionamento disponível. As seções 7 a 9 completam a especificação com estados, NAK, retransmissões e simulação de falhas, indicando o que muda no CP3. A seção 10 define a opção de criptografia para a entrega final.
+As seções 1 a 6 descrevem os pacotes e o caminho sem falhas. As seções 7 a 9 tratam dos estados, da recuperação com NAK e retransmissões e da simulação de falhas. A seção 10 trata dos pontos extras.
 
 ## 1. Visão geral e parâmetros
 
@@ -14,13 +14,15 @@ A comunicação usa sockets UDP. No início de cada sessão, o cliente informa o
 | Porta padrão | 50000 | Configurável via `--port` |
 | Ordem dos bytes | Big-endian | Usada nos campos com mais de um byte |
 | Modo de operação | `0` (Individual), `1` (Batch) | Definido no campo `MODE` do `HELLO` |
-| Estratégia de confirmação em batch | `0` (Go-Back-N), `1` (Repetição Seletiva) | Definido no campo `STRATEGY` do `HELLO`; retransmissão ainda não implementada |
+| Estratégia de confirmação em batch | `0` (Go-Back-N), `1` (Repetição Seletiva) | Definido no campo `STRATEGY` do `HELLO`; define como os ACKs e as retransmissões funcionam |
 | Payload máximo | 4 pontos de código Unicode, até 16 bytes em UTF-8 | Texto fragmentado antes da codificação; limite validado por pacote `DATA` |
 | Limite máximo do texto | Padrão 30 caracteres; configurável de 30 a 65.535 | Informado no campo `MAX_TEXT` de 2 bytes do `HELLO` |
 | Janela de recepção | 1 a 5; padrão 5 | Configurada por `--window` no servidor e anunciada no `HELLO_ACK`; constante durante a sessão |
 | Buffer do socket | 1024 bytes | Constante `BUFSIZE` |
-| Timeout do cliente no CP2 | 5.0 segundos | Espera por `HELLO_ACK` ou por novas confirmações de DATA |
-| Timeout de sessão no servidor no CP2 | 5.0 segundos | Espera por `READY` ou por novos fragmentos válidos |
+| Timeout do handshake | 5 segundos | Espera por `HELLO_ACK` no cliente e por `READY` no servidor |
+| Temporizador de retransmissão | 5 segundos | Prazo de cada DATA, ou da base em GBN, antes do reenvio |
+| Retransmissões por DATA | Até 3 | Depois disso, o cliente encerra com erro |
+| Timeout de sessão no servidor | 25 segundos | Espera por um novo fragmento aceito; também é o tempo de retenção de uma sessão concluída |
 
 O mínimo de 30 se refere ao limite configurado, não ao tamanho obrigatório da mensagem. Com `MAX_TEXT = 30`, por exemplo, uma mensagem de um caractere está dentro do limite. Para a contagem e a fragmentação, cada caractere corresponde a um ponto de código Unicode.
 
@@ -32,7 +34,7 @@ O cliente valida `--max-text` e, quando informado, `--text` antes de abrir o soc
 
 ### 2.1 Cabeçalho comum
 
-Todos os pacotes começam com dois campos: `MAGIC`, que identifica o protocolo, e `TYPE`, que informa qual mensagem foi enviada. Esse cabeçalho é mantido nos formatos de `DATA` e `ACK` implementados para o CP2.
+Todos os pacotes começam com dois campos: `MAGIC`, que identifica o protocolo, e `TYPE`, que informa qual mensagem foi enviada.
 
 ```
 +--------+--------+
@@ -44,14 +46,14 @@ Todos os pacotes começam com dois campos: `MAGIC`, que identifica o protocolo, 
 - **MAGIC** (`0xAA`): Identificador do protocolo.
 - **TYPE**: Identificador de 1 byte, conforme a tabela abaixo.
 
-| TYPE | Pacote | Estado |
+| TYPE | Pacote | Uso |
 |---|---|---|
-| `0x01` | `HELLO` | Implementado no CP1 |
-| `0x02` | `HELLO_ACK` | Implementado no CP1 |
-| `0x03` | `READY` | Implementado no CP1 |
-| `0x04` | `DATA` | Montagem, leitura e transferência individual e em batch implementadas |
-| `0x05` | `ACK` | Montagem, leitura e confirmações individuais e cumulativas implementadas |
-| `0x06` | `NAK` | Definido na seção 8.1; implementação no CP3 |
+| `0x01` | `HELLO` | Cliente inicia o handshake |
+| `0x02` | `HELLO_ACK` | Servidor responde com a janela |
+| `0x03` | `READY` | Cliente conclui o handshake |
+| `0x04` | `DATA` | Fragmento do texto |
+| `0x05` | `ACK` | Reconhecimento positivo |
+| `0x06` | `NAK` | Reconhecimento negativo, descrito na seção 8.1 |
 
 Todos os campos numéricos são inteiros sem sinal. Campos com mais de um byte usam big-endian, com o byte mais significativo primeiro.
 
@@ -59,7 +61,7 @@ Todos os campos numéricos são inteiros sem sinal. Campos com mais de um byte u
 
 ### 2.2 Pacotes de handshake (CP1)
 
-#### HELLO (Cliente -> Servidor) — 7 bytes
+#### HELLO (Cliente -> Servidor), 7 bytes
 
 O cliente envia `HELLO` para iniciar a comunicação e informar os parâmetros que deseja usar.
 
@@ -79,7 +81,7 @@ O cliente envia `HELLO` para iniciar a comunicação e informar os parâmetros q
 | MAX_TEXT | 2 bytes | unsigned int, big-endian | Limite máximo da mensagem em caracteres; de 30 a 65.535, com padrão 30 |
 | RESERVED | 1 byte | unsigned int | `0x00` (reservado) |
 
-#### HELLO_ACK (Servidor -> Cliente) — 3 bytes
+#### HELLO_ACK (Servidor -> Cliente), 3 bytes
 
 O servidor responde com `HELLO_ACK`, informando o tamanho da janela configurado por `--window` (padrão 5). Esse valor permanece válido durante toda a sessão.
 
@@ -96,7 +98,7 @@ O servidor responde com `HELLO_ACK`, informando o tamanho da janela configurado 
 | TYPE | 1 byte | unsigned int | `0x02` |
 | WINDOW | 1 byte | unsigned int | Tamanho da janela de 1 a 5, com padrão 5 |
 
-#### READY (Cliente -> Servidor) — 2 bytes
+#### READY (Cliente -> Servidor), 2 bytes
 
 ```
 +--------+--------+
@@ -144,7 +146,7 @@ CLIENTE                                                      SERVIDOR
 - Se o cliente não receber resposta em até cinco segundos, ele informa o timeout e encerra a tentativa.
 - O servidor também espera até cinco segundos pelo `READY`. Se esse prazo terminar sem a mensagem esperada, registra o handshake interrompido e volta a aguardar um novo `HELLO`, sem iniciar a recepção de DATA.
 
-Esses timeouts encerram a tentativa de handshake. Não há retransmissão automática dessa etapa; uma nova tentativa exige executar o cliente novamente. A simulação de falhas do CP3 começa depois do `READY` e não altera o handshake.
+Esses timeouts encerram a tentativa de handshake. Não há retransmissão automática dessa etapa; uma nova tentativa exige executar o cliente novamente. A simulação de falhas da seção 9 começa depois do `READY` e não altera o handshake.
 
 ---
 
@@ -152,7 +154,7 @@ Esses timeouts encerram a tentativa de handshake. Não há retransmissão autom�
 
 As funções `build_data`, `build_ack` e `parse_packet`, em `src/protocol.py`, montam e leem esses pacotes, validando seus campos e checksum. A validação de um pacote não determina se um ACK corresponde a um fragmento enviado nem se a mensagem completa respeita o `MAX_TEXT` negociado; essas regras dependem da sessão.
 
-As seções 4 a 6 descrevem a transferência de uma mensagem de texto não vazia, sem erros ou perdas. A fragmentação, a preparação dos pacotes, as transferências individual e em batch e a reconstrução no servidor estão implementadas. Cada datagrama UDP transporta um pacote do protocolo. Os formatos do handshake e seus timeouts de cinco segundos permanecem como descritos nas seções anteriores.
+As seções 4 a 6 descrevem a transferência de uma mensagem de texto não vazia no caminho sem erros ou perdas. O tratamento de falhas está na seção 8. Cada datagrama UDP transporta um pacote do protocolo. Os formatos do handshake e seus timeouts de cinco segundos permanecem como descritos nas seções anteriores.
 
 ### 4.1 Texto, fragmentação e sequência
 
@@ -219,22 +221,22 @@ Em GBN, o servidor só confirma `n` quando tiver recebido todos os fragmentos at
 
 ### 4.4 Checksum de DATA e ACK
 
-O cálculo manual do checksum de 16 bits em complemento de um e sua verificação estão implementados em `src/protocol.py`, pelas funções `calculate_checksum(data)` e `verify_checksum(data)`, sem usar uma função pronta de checksum. Elas processam os bytes exatamente como recebidos, sem interpretar campos ou tipos de pacote. Os construtores de `DATA` e `ACK` zeram o campo `CHECKSUM` antes de chamar o cálculo, seguindo estas regras:
+O cálculo manual do checksum de 16 bits em complemento de um e sua verificação estão implementados em `src/protocol.py`, pelas funções `calculate_checksum(data)` e `verify_checksum(data)`, sem usar uma função pronta de checksum. Elas processam os bytes exatamente como recebidos, sem interpretar campos ou tipos de pacote. Os construtores de `DATA`, `ACK` e `NAK` zeram o campo `CHECKSUM` antes de chamar o cálculo, seguindo estas regras:
 
-1. Montar os bytes do pacote com os dois bytes de `CHECKSUM` zerados. Em `DATA`, o cálculo cobrirá `MAGIC`, `TYPE`, `SEQ`, `LAST`, `LEN`, o campo `CHECKSUM` zerado e todos os bytes do `PAYLOAD`. Em `ACK`, cobrirá os 6 bytes do pacote, também com `CHECKSUM` zerado. Cabeçalhos IP e UDP não entrarão nessa soma.
-2. Agrupar os bytes em palavras de 16 bits em big-endian. Se a quantidade de bytes for ímpar, acrescentar um byte zero à direita apenas para o cálculo. Esse preenchimento não será enviado e não entrará em `LEN`.
+1. Montar os bytes do pacote com os dois bytes de `CHECKSUM` zerados. Em `DATA`, o cálculo cobre `MAGIC`, `TYPE`, `SEQ`, `LAST`, `LEN`, o campo `CHECKSUM` zerado e todos os bytes do `PAYLOAD`. Em `ACK` e `NAK`, cobre os 6 bytes do pacote, também com `CHECKSUM` zerado. Cabeçalhos IP e UDP não entram nessa soma.
+2. Agrupar os bytes em palavras de 16 bits em big-endian. Se a quantidade de bytes for ímpar, acrescentar um byte zero à direita apenas para o cálculo. Esse preenchimento não é enviado e não entra em `LEN`.
 3. Somar as palavras. Sempre que houver transporte além dos 16 bits, somá-lo de volta aos 16 bits inferiores, repetindo até não restar transporte.
 4. Inverter os 16 bits do resultado e gravar o valor no campo `CHECKSUM`, em big-endian.
 
-Na leitura por `parse_packet`, a mesma soma com transporte circular é feita sobre o pacote inteiro, desta vez incluindo o checksum recebido, sem zerá-lo. O byte zero de preenchimento é considerado novamente quando o tamanho é ímpar. O resultado deve ser `0xFFFF`; de forma equivalente, seu complemento deve ser `0x0000`. O parser aplica essa verificação a `DATA` e `ACK` e rejeita campos inválidos, pacotes truncados e bytes extras com `ValueError`. Os pacotes de handshake não recebem checksum.
+Na leitura por `parse_packet`, a mesma soma com transporte circular é feita sobre o pacote inteiro, desta vez incluindo o checksum recebido, sem zerá-lo. O byte zero de preenchimento é considerado novamente quando o tamanho é ímpar. O resultado deve ser `0xFFFF`; de forma equivalente, seu complemento deve ser `0x0000`. O parser aplica essa verificação a `DATA`, `ACK` e `NAK`. Quando um pacote com tamanho correto falha nela, o parser gera `ChecksumError`, o que permite ao servidor distinguir um DATA corrompido e responder com NAK. Campos inválidos, pacotes truncados e bytes extras geram `ValueError`. Os pacotes de handshake não recebem checksum.
 
-Nos dois modos, só um pacote com checksum válido e campos coerentes pode ser aceito ou confirmado. O servidor valida os DATA e o cliente valida os ACKs com `parse_packet`, além de conferir a origem e as sequências permitidas pela sessão.
+Nos dois modos, só um pacote com checksum válido e campos coerentes pode ser aceito ou confirmado. O servidor valida os DATA e o cliente valida os ACKs e NAKs com `parse_packet`, além de conferir a origem e as sequências permitidas pela sessão.
 
 ---
 
 ## 5. Transferência sem erros ou perdas
 
-Depois do handshake, o cliente envia os pacotes `DATA` preparados conforme a seção 4.1. O servidor recebe apenas da sessão ativa. No modo individual e em GBN, aceita somente a sequência esperada, começando em zero. Em SR, também aceita fragmentos adiantados dentro da janela de recepção e os armazena por sequência. Antes de armazenar e confirmar cada fragmento, confere o formato, o checksum e o limite total de caracteres negociado. Pacotes inválidos, de outra origem, duplicados ou fora do intervalo permitido são descartados sem ACK e sem acrescentar conteúdo ou contar caracteres novamente.
+Depois do handshake, o cliente envia os pacotes `DATA` preparados conforme a seção 4.1. O servidor recebe apenas da sessão ativa. No modo individual e em GBN, aceita somente a sequência esperada, começando em zero. Em SR, também aceita fragmentos adiantados dentro da janela de recepção e os armazena por sequência. Antes de armazenar e confirmar cada fragmento, confere o formato, o checksum e o limite total de caracteres negociado. Pacotes inválidos, de outra origem ou fora do intervalo permitido são descartados sem acrescentar conteúdo nem contar caracteres novamente. Duplicatas e DATA corrompidos seguem a seção 8.3.
 
 O servidor exibe sequência, `LAST`, comprimento e checksum dos DATA recebidos; o cliente exibe sequência e checksum dos ACKs recebidos. Um ACK só permite confirmar dados se vier do endereço do servidor, tiver tipo e checksum válidos e se referir a uma sequência já enviada. ACKs antigos ou repetidos não fazem a base retroceder nem liberam espaço adicional. O cliente resolve `localhost` para conferir esse endereço.
 
@@ -242,12 +244,12 @@ O servidor exibe sequência, `LAST`, comprimento e checksum dos DATA recebidos; 
 
 O servidor anuncia a janela configurada, de 1 a 5, no `HELLO_ACK`. No modo individual, o cliente mantém apenas um pacote sem confirmação: envia o fragmento `n`, aguarda seu ACK e só então envia `n + 1`. O comportamento é o mesmo com estratégia GBN ou SR.
 
-A base da janela em batch é o menor número de sequência ainda não confirmado. O cliente preenche o intervalo de `base` até `base + WINDOW - 1`, limitado ao último fragmento da mensagem, antes de aguardar ACKs. Cada DATA é enviado uma única vez. Conforme a base avança, os novos fragmentos liberados são enviados sem esperar a confirmação do lote inteiro.
+A base da janela em batch é o menor número de sequência ainda não confirmado. O cliente preenche o intervalo de `base` até `base + WINDOW - 1`, limitado ao último fragmento da mensagem, antes de aguardar ACKs. Sem falhas, cada DATA é enviado uma única vez. Conforme a base avança, os novos fragmentos liberados são enviados sem esperar a confirmação do lote inteiro.
 
 - Em GBN, `ACK n` confirma tudo até `n`, inclusive, e a base avança para `n + 1`, se esse ACK trouxer novas confirmações. O servidor pode emitir um ACK a cada avanço da sequência contígua recebida.
 - Em SR, cada ACK marca apenas seu fragmento como confirmado. A base avança pelos fragmentos consecutivos já confirmados; um ACK de sequência maior, sozinho, não permite pular uma lacuna nem enviar além de `base + WINDOW - 1`.
 
-Na recepção SR, a base é a primeira sequência ainda não recebida. O servidor aceita novos fragmentos no intervalo de `base` até `base + WINDOW - 1`, confirma cada um individualmente e avança a base pelas sequências consecutivas já armazenadas. Há no máximo `WINDOW` pacotes pendentes no cliente, todos dentro do intervalo permitido. A recuperação por retransmissão está definida na seção 8 e será implementada no CP3.
+Na recepção SR, a base é a primeira sequência ainda não recebida. O servidor aceita novos fragmentos no intervalo de `base` até `base + WINDOW - 1`, confirma cada um individualmente e avança a base pelas sequências consecutivas já armazenadas. Há no máximo `WINDOW` pacotes pendentes no cliente, todos dentro do intervalo permitido. A recuperação por retransmissão está na seção 8.
 
 ### 5.2 Conclusão da mensagem
 
@@ -259,9 +261,9 @@ O cliente individual só informa a transferência concluída após receber o ACK
 
 ### 5.3 Espera e encerramento por timeout
 
-O cliente individual espera até cinco segundos pelo ACK de cada DATA. Em batch, espera até cinco segundos sem novas confirmações. Se o prazo expirar, encerra com status de erro, sem reenviar pacotes. Pacotes inválidos, ACKs de sequências não enviadas e confirmações antigas ou repetidas não renovam esse prazo.
+O cliente espera até cinco segundos pela confirmação de cada DATA pendente. Quando o prazo termina, retransmite conforme a seção 8.2. Pacotes inválidos, ACKs de sequências não enviadas e confirmações antigas ou repetidas não renovam esse prazo.
 
-O servidor encerra uma sessão após cinco segundos sem aceitar novos fragmentos, descarta o texto incompleto e volta a aguardar `HELLO`. Esse prazo também libera uma sessão que tenha feito apenas o handshake, pois o protocolo não informa se o cliente tem texto a enviar. Pacotes inválidos, repetidos ou de outras origens não renovam a espera. O timeout do socket é removido ao encerrar a sessão para permitir a próxima comunicação.
+O servidor encerra uma sessão após 25 segundos sem aceitar novos fragmentos, descarta o texto incompleto e volta a aguardar `HELLO`. Esse prazo cobre as quatro tentativas de envio do cliente. Esse prazo também libera uma sessão que tenha feito apenas o handshake, pois o protocolo não informa se o cliente tem texto a enviar. Pacotes inválidos, repetidos ou de outras origens não renovam a espera. O timeout do socket é removido ao encerrar a sessão para permitir a próxima comunicação.
 
 ---
 
@@ -308,25 +310,28 @@ Uma sessão transporta uma mensagem e é identificada pelo IP e pela porta UDP d
 | Espera de `HELLO_ACK` | Timeout ou resposta inválida | Encerrar com erro |
 | Transferência | ACK com nova confirmação | Atualizar confirmações e enviar os fragmentos liberados pela janela |
 | Transferência | Todos os fragmentos confirmados | Informar conclusão e fechar o socket |
-| Transferência | Timeout | No CP2, encerrar com erro; no CP3, aplicar a seção 8.2 |
-| Transferência | NAK válido | Apenas no CP3, aplicar a seção 8.2 |
+| Transferência | Timeout | Reenviar conforme a seção 8.2; após três retransmissões do mesmo DATA, encerrar com erro |
+| Transferência | NAK válido | Reenviar conforme a seção 8.2 |
 
 Durante a transferência, respostas inválidas ou de outra origem são ignoradas, sem alterar confirmações ou renovar temporizadores.
 
 | Estado do servidor | Evento | Ação e próximo estado |
 |---|---|---|
 | Espera de `HELLO` | `HELLO` válido | Registrar parâmetros e origem, enviar `HELLO_ACK` e aguardar `READY` |
+| Espera de `HELLO` | DATA repetido de uma sessão retida | Reenviar o ACK correspondente, conforme a seção 8.4 |
 | Espera de `READY` | `READY` válido da mesma origem | Iniciar recepção da mensagem |
 | Espera de `READY` | Timeout | Liberar a sessão e aguardar `HELLO` |
 | Recepção | Novo DATA válido e permitido | Armazenar, confirmar e avançar a recepção conforme o modo |
-| Recepção | Mensagem completa | Exibir o texto uma vez e voltar a aguardar `HELLO`; no CP3, preservar o registro descrito na seção 8.4 |
+| Recepção | DATA com checksum incorreto | Enviar NAK da primeira sequência que falta |
+| Recepção | DATA repetido | Reenviar o ACK correspondente, sem alterar o texto |
+| Recepção | Mensagem completa | Exibir o texto uma vez, guardar o registro da seção 8.4 e voltar a aguardar `HELLO` |
 | Recepção | Timeout da sessão | Descartar o texto incompleto e aguardar `HELLO` |
 
-O servidor mantém uma transferência ativa por vez. Pacotes sem transição prevista são descartados; durante uma sessão, outra origem não substitui o cliente atual. No CP3, DATA corrompido, fora de ordem ou repetido segue as regras da seção 8.3.
+O servidor mantém uma transferência ativa por vez. Pacotes sem transição prevista são descartados; durante uma sessão, outra origem não substitui o cliente atual. DATA corrompido, fora de ordem ou repetido segue as regras da seção 8.3.
 
-## 8. Recuperação de erros e perdas — implementação no CP3
+## 8. Recuperação de erros e perdas
 
-Estas regras completam a especificação exigida no CP2. O código atual encerra a transferência no timeout, descarta duplicatas sem ACK e não reconhece `NAK`. No CP3, esses comportamentos serão substituídos pelos definidos a seguir, preservando os formatos existentes de `DATA` e `ACK`.
+O cliente recupera perdas e corrupções com temporizadores, NAK e retransmissões, sem alterar os formatos de `DATA` e `ACK`. No código, essa lógica está em `ReliableSender`, no cliente, e em `receive_message`, no servidor. Os dois tratam o modo individual como Repetição Seletiva com janela 1, já que nele existe só um pacote pendente por vez.
 
 ### 8.1 NAK (Servidor -> Cliente)
 
@@ -359,7 +364,7 @@ No modo individual, o ACK esperado cancela o temporizador. Em GBN, um ACK que av
 
 Após reenviar por NAK, o cliente ignora novos NAKs para a mesma sequência até receber seu ACK ou ocorrer o próximo timeout. Em GBN, essa limitação vale para a base atual e termina quando ela avança ou seu temporizador expira. Assim, vários pacotes corrompidos que provoquem o mesmo pedido não esgotam as tentativas antes de chegar uma resposta ao reenvio.
 
-No CP3, a sessão de recepção expira após 25 segundos sem aceitar um novo fragmento. Isso permite as quatro tentativas do cliente e a espera pela última resposta, que somam até 20 segundos sem confirmação. Duplicatas e pacotes inválidos não renovam o prazo de recepção. O timeout do handshake continua em cinco segundos. No CP2, permanece o timeout de cinco segundos da seção 5.3.
+A sessão de recepção expira após 25 segundos sem aceitar um novo fragmento. Isso permite as quatro tentativas do cliente e a espera pela última resposta, que somam até 20 segundos sem confirmação. Duplicatas e pacotes inválidos não renovam o prazo de recepção. O timeout do handshake continua em cinco segundos.
 
 ### 8.3 Recepção, duplicatas e ordem
 
@@ -382,13 +387,13 @@ O cliente só informa sucesso quando todos os fragmentos estiverem confirmados. 
 
 Para recuperar uma confirmação perdida após completar a mensagem, o servidor preserva por 25 segundos um registro da sessão concluída: origem, modo, estratégia e fragmentos aceitos. O prazo começa na conclusão e não é renovado. Durante esse período, uma duplicata válida recebe novamente seu ACK no modo individual ou SR, ou o ACK cumulativo final em GBN. Isso também cobre um ACK anterior perdido em SR, mesmo que o último fragmento já tenha sido confirmado. O texto não é exibido novamente.
 
-Esse registro não ocupa a transferência ativa: o servidor pode atender outro cliente, de outra porta UDP, enquanto responde a duplicatas da sessão concluída. Um `HELLO` da mesma origem ainda retida é ignorado. Cada nova mensagem usa um novo socket e uma porta que não esteja em retenção; a alternativa é aguardar o prazo antes de reutilizar a origem. Após 25 segundos, o registro é removido. A identificação por IP e porta pressupõe esse intervalo entre reutilizações e não cobre datagramas antigos que sobrevivam além dele.
+O registro é consultado enquanto o servidor aguarda `HELLO`, então não impede que outro cliente, de outra porta UDP, inicie uma sessão. Quando essa nova sessão começa, o registro anterior é descartado e as duplicatas antigas deixam de ser respondidas. Se o cliente antigo ainda esperava alguma confirmação, ele termina com erro ao esgotar as tentativas. Um `HELLO` da mesma origem ainda retida é ignorado. Cada nova mensagem usa um novo socket e uma porta que não esteja em retenção; a alternativa é aguardar o prazo antes de reutilizar a origem. Após 25 segundos, o registro é removido. A identificação por IP e porta pressupõe esse intervalo entre reutilizações e não cobre datagramas antigos que sobrevivam além dele.
 
 Se todas as confirmações se perderem até esgotar as tentativas, o cliente informa falha, mesmo que o servidor já tenha exibido o texto. O protocolo não promete distinguir esse caso de uma mensagem que não chegou ao destino.
 
-## 9. Simulação determinística — implementação no CP3
+## 9. Simulação determinística
 
-A simulação será configurada no cliente e ficará desativada por padrão. Cada regra indica o tipo de pacote (`DATA`, `ACK` ou `NAK`), a sequência, a ocorrência a partir de 1 e a ação (`perder` ou `corromper`). Para DATA, ocorrência é a tentativa de envio; para ACK e NAK, é a chegada de uma resposta válida daquele tipo e sequência, antes de aplicar a falha. A regra afeta somente a ocorrência indicada; para repetir a falha, é preciso indicar outras ocorrências. Regras conflitantes para o mesmo evento são rejeitadas antes do handshake.
+A simulação é configurada no cliente pela opção `--fault`, que pode ser repetida, e fica desativada por padrão. Cada regra tem o formato `TIPO:SEQ:OCORRÊNCIA:AÇÃO`, como `DATA:1:1:perder`, e indica o tipo de pacote (`DATA`, `ACK` ou `NAK`), a sequência, a ocorrência a partir de 1 e a ação (`perder` ou `corromper`). Para DATA, ocorrência é a tentativa de envio; para ACK e NAK, é a chegada de uma resposta válida daquele tipo e sequência, antes de aplicar a falha. A regra afeta somente a ocorrência indicada; para repetir a falha, é preciso indicar outras ocorrências. Regras conflitantes para o mesmo evento são rejeitadas antes do handshake.
 
 - **Perda de DATA:** o cliente registra a tentativa e inicia o temporizador, mas não envia o datagrama.
 - **Corrupção de DATA:** o cliente altera o bit menos significativo do primeiro byte do payload de uma cópia do pacote, depois de calcular o checksum, sem recalculá-lo. O pacote original permanece disponível para reenvio.
@@ -404,10 +409,12 @@ A perda e a corrupção de respostas são simuladas na entrada do cliente; não 
 | Perder o primeiro ACK da sequência final | Cliente recupera a confirmação por retransmissão, sem duplicar a entrega do texto |
 | Perder as quatro tentativas de DATA 0 | Cliente encerra com erro ao esgotar as tentativas |
 
-## 10. Pontos extras na entrega final
+A lógica fica em `src/faults.py`. A saída real desses e de outros cenários está em [cenarios-cp3.md](cenarios-cp3.md).
 
-O checksum de 16 bits já é calculado e verificado manualmente. Ele cobre cabeçalho e payload de DATA e ACK; o NAK usará o mesmo cálculo no CP3. Para a entrega final, os testes de alteração de bytes e a simulação de corrupção demonstrarão a detecção e a recuperação. A avaliação do bônus depende também da explicação e da autoria exigidas no enunciado.
+## 10. Pontos extras
 
-A opção de criptografia será a cifra de César, implementada pelo grupo, sem bibliotecas de criptografia. Ficará desativada por padrão. Quando habilitada, cliente e servidor devem ser configurados previamente com a mesma chave inteira de 1 a 25; a chave não é enviada pelo protocolo. Para letras ASCII, `A` a `Z` e `a` a `z`, a posição da letra cifrada é `(posição + chave) mod 26`, preservando maiúsculas e minúsculas. A decifragem subtrai a chave. Espaços, acentos e demais caracteres permanecem iguais. Por exemplo, com chave 3, `REDE LOCAL` vira `UHGH ORFDO`.
+O checksum de 16 bits é calculado e verificado manualmente, sem bibliotecas, e cobre DATA, ACK e NAK. A simulação de corrupção da seção 9 mostra a detecção e a recuperação na prática.
 
-O cliente valida o limite do texto original, cifra, fragmenta, codifica em UTF-8 e calcula o checksum. O servidor valida o checksum dos bytes recebidos, reconstrói o texto cifrado e só então decifra para exibição. A transformação preserva a quantidade de caracteres e os formatos dos pacotes. É uma cifra didática, escolhida para a demonstração do bônus; sua implementação fica para a entrega final.
+A criptografia simétrica usa a cifra de César, também implementada pelo grupo, em `src/cipher.py`, sem bibliotecas de criptografia. Ela fica desativada por padrão. Para usá-la, cliente e servidor recebem a mesma chave inteira de 1 a 25 pela opção `--key`; a chave não é enviada pelo protocolo. Para letras ASCII, `A` a `Z` e `a` a `z`, a posição da letra cifrada é `(posição + chave) mod 26`, preservando maiúsculas e minúsculas. A decifragem subtrai a chave. Espaços, acentos e demais caracteres permanecem iguais. Por exemplo, com chave 3, `REDE LOCAL` vira `UHGH ORFDO`.
+
+O cliente cifra o texto e depois fragmenta, codifica em UTF-8 e calcula o checksum. Como a cifra preserva a quantidade de caracteres, o limite `MAX_TEXT` vale igualmente para o texto original. O servidor valida o checksum dos bytes recebidos, reconstrói o texto cifrado, exibe esse texto e só então o decifra. Os formatos dos pacotes não mudam. É uma cifra didática, escolhida para a demonstração do bônus, e não oferece segurança real.

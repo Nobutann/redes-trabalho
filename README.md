@@ -1,12 +1,12 @@
-# Trabalho I — Transporte Confiável na Camada de Aplicação
+# Trabalho I: Transporte Confiável na Camada de Aplicação
 
 Este projeto faz parte da disciplina de Infraestrutura de Comunicação. O objetivo é construir uma aplicação cliente-servidor que use UDP e implemente suas próprias regras de transporte confiável.
 
-A aplicação divide textos em fragmentos de até quatro caracteres e prepara pacotes com número de sequência, indicador de último fragmento e checksum. No modo individual, envia um fragmento por vez e aguarda seu ACK. Em batch, usa uma janela anunciada pelo servidor, com confirmações cumulativas em Go-Back-N ou individuais em Repetição Seletiva. O servidor reconstrói o texto nos dois modos.
+A aplicação divide textos em fragmentos de até quatro caracteres e prepara pacotes com número de sequência, indicador de último fragmento e checksum. No modo individual, envia um fragmento por vez e aguarda seu ACK. Em batch, usa uma janela anunciada pelo servidor, com confirmações cumulativas em Go-Back-N ou individuais em Repetição Seletiva. Perdas e corrupções são recuperadas com temporizadores, NAK e retransmissões, e podem ser simuladas de forma determinística no cliente.
 
-**Estado atual:** Código e especificação do CP2 concluídos. As transferências individual e em batch funcionam no caminho sem erros ou perdas, usando o mesmo socket do handshake e o checksum manual de `src/protocol.py`. Os timeouts encerram tentativas sem progresso.
+**Estado atual:** CP3 concluído. O projeto cobre todas as características de transporte confiável pedidas no enunciado: soma de verificação, temporizador, número de sequência, reconhecimento positivo e negativo, janela e paralelismo. Os dois pontos extras também estão implementados: o checksum de 16 bits e a cifra de César, ambos feitos à mão.
 
-A [especificação do protocolo](docs/protocolo.md) reúne os formatos dos pacotes, os estados da sessão e as regras de confirmação e recuperação. NAK, retransmissões e simulação de falhas estão definidos para implementação no CP3. A cifra de César está prevista para o bônus da entrega final.
+A [especificação do protocolo](docs/protocolo.md) reúne os formatos dos pacotes, os estados da sessão e as regras de confirmação e recuperação. Os [cenários de erros e perdas](docs/cenarios-cp3.md) mostram a saída real de cada situação tratada pelo protocolo.
 
 ---
 
@@ -14,9 +14,9 @@ A [especificação do protocolo](docs/protocolo.md) reúne os formatos dos pacot
 
 | Marco | Data | Status | Escopo |
 |---|---|---|---|
-| Checkpoint 1 — Handshake & Sockets | 09/09/2026 | Concluído | Conexão UDP e handshake de 3 vias (modo, estratégia, tamanho máximo e janela) |
-| Checkpoint 2 — Protocolo sem erros | 21/10/2026 | Código e protocolo concluídos | Definição completa do protocolo e transferência de dados sem erros ou perdas |
-| Checkpoint 3 — Erros e perdas | 23/11/2026 | Pendente | Simulação determinística de falhas e recuperação com temporizadores, Go-Back-N e Repetição Seletiva |
+| Checkpoint 1: Handshake & Sockets | 09/09/2026 | Concluído | Conexão UDP e handshake de 3 vias (modo, estratégia, tamanho máximo e janela) |
+| Checkpoint 2: Protocolo sem erros | 21/10/2026 | Concluído | Definição completa do protocolo e transferência de dados sem erros ou perdas |
+| Checkpoint 3: Erros e perdas | 23/11/2026 | Concluído | Simulação determinística de falhas e recuperação com temporizadores, NAK, Go-Back-N e Repetição Seletiva |
 
 ---
 
@@ -26,19 +26,25 @@ A [especificação do protocolo](docs/protocolo.md) reúne os formatos dos pacot
 redes-trabalho/
 ├── README.md
 ├── docs/
-│   ├── protocolo.md           # Formato dos pacotes e fluxo de comunicação
+│   ├── protocolo.md           # Formato dos pacotes, estados e regras de recuperação
+│   ├── cenarios-cp3.md        # Saídas reais dos cenários de erros e perdas
 │   └── exemplo-handshake.txt  # Exemplo de saída do handshake
 ├── src/
 │   ├── protocol.py            # Fragmentação, checksum, montagem e leitura dos pacotes
-│   ├── server.py              # Servidor UDP, handshake e recepção do texto
-│   └── client.py              # Cliente UDP e interface CLI
+│   ├── server.py              # Servidor UDP, handshake, recepção, NAK e duplicatas
+│   ├── client.py              # Cliente UDP, janela, temporizadores e retransmissão
+│   ├── faults.py              # Simulação determinística de perdas e corrupções
+│   └── cipher.py              # Cifra de César
 └── tests/
     ├── test_batch.py          # Janelas, confirmações GBN/SR e configuração do servidor
-    ├── test_checksum.py       # Testes do cálculo e da verificação do checksum
-    ├── test_client.py         # CLI, handshake e envio individual com ACK
+    ├── test_checksum.py       # Cálculo e verificação do checksum
+    ├── test_cipher.py         # Cifra de César
+    ├── test_client.py         # CLI, handshake, falhas simuladas e cifra no cliente
+    ├── test_faults.py         # Regras de falha e alteração dos pacotes
     ├── test_fragmentation.py  # Preparação de DATA, limites e preservação do texto
-    ├── test_packets.py        # Formatos, validação de DATA/ACK e compatibilidade do handshake
-    ├── test_server.py         # Recepção, reconstrução e encerramento de sessões
+    ├── test_packets.py        # Formatos e validação de DATA, ACK, NAK e handshake
+    ├── test_recovery.py       # Timeouts, NAK e retransmissões em GBN, SR e individual
+    ├── test_server.py         # Recepção, NAK, duplicatas e retenção de sessões
     └── test_transfer.py       # Integração com UDP real em localhost
 ```
 
@@ -62,7 +68,13 @@ Por padrão, o servidor escuta em `0.0.0.0:50000` e anuncia uma janela de cinco 
 python src/server.py --port 50001 --window 3
 ```
 
-A janela anunciada no `HELLO_ACK` permanece válida durante toda a sessão. O cliente usa esse valor, sem alterar a janela durante a transferência.
+A janela anunciada no `HELLO_ACK` permanece válida durante toda a sessão.
+
+Parâmetros disponíveis em `server.py`:
+
+- `--port`: Porta UDP (padrão: `50000`)
+- `--window`: Janela de recepção, de 1 a 5 (padrão: `5`)
+- `--key`: Chave da cifra de César, de 1 a 25. Deve ser a mesma usada no cliente. Sem ela, o texto é exibido como chegou.
 
 ### 2. Executar o cliente
 
@@ -82,43 +94,90 @@ python src/client.py --mode batch --strategy gbn --text "ABCDEFGHIJKLMNOPQRSTUVW
 python src/client.py --mode batch --strategy sr --max-text 100
 ```
 
-Sem `--text`, o cliente executa apenas o handshake. Com `--text`, valida e prepara os pacotes antes de abrir o socket. Após o handshake, o modo individual envia cada `DATA` e aguarda seu ACK antes de avançar. Em batch, preenche a janela antes de esperar ACKs e envia novos fragmentos conforme a base avança. Em GBN, `ACK n` confirma tudo até `n`; em SR, confirma apenas `n`, e a base só avança pelas confirmações consecutivas. O servidor exibe o texto apenas quando todos os fragmentos tiverem sido recebidos, e o cliente conclui quando todos estiverem confirmados.
+Sem `--text`, o cliente executa apenas o handshake. Com `--text`, valida e prepara os pacotes antes de abrir o socket. O modo individual envia cada `DATA` e aguarda seu ACK antes de avançar. Em batch, o cliente preenche a janela antes de esperar ACKs e envia novos fragmentos conforme a base avança. Em GBN, `ACK n` confirma tudo até `n`; em SR, confirma apenas `n`, e a base só avança pelas confirmações consecutivas.
 
-O cliente encerra com status de erro após cinco segundos sem novas confirmações. O servidor encerra uma sessão após cinco segundos sem aceitar novos fragmentos e volta a aguardar `HELLO`. Isso também libera sessões de clientes sem `--text`. Pacotes inválidos ou repetidos não renovam a espera. Não há retransmissão. O servidor atende uma sessão por vez; após um handshake sem texto, aguarde esse prazo antes de iniciar outra sessão.
+Se um DATA não for confirmado em cinco segundos, ou se o servidor responder com NAK, o cliente retransmite: em GBN, todos os pendentes a partir da base; em SR e no modo individual, somente o pacote afetado. Cada DATA admite até três retransmissões. Depois disso, o cliente encerra com status de erro. O servidor responde novamente a duplicatas e encerra uma sessão após 25 segundos sem receber novos fragmentos.
 
 Parâmetros disponíveis em `client.py`:
 
 - `--host`: IP do servidor ou `localhost` (padrão: `127.0.0.1`)
 - `--port`: Porta UDP do servidor (padrão: `50000`)
-- `--mode`: Modo de transferência — `individual` ou `batch` (padrão: `individual`)
-- `--strategy`: Estratégia de confirmação em batch — `gbn` ou `sr` (padrão: `gbn`). No modo individual, ambas usam a mesma transferência sem retransmissão.
+- `--mode`: Modo de transferência, `individual` ou `batch` (padrão: `individual`)
+- `--strategy`: Estratégia de confirmação em batch, `gbn` ou `sr` (padrão: `gbn`). No modo individual, as duas se comportam da mesma forma.
 - `--max-text`: Limite máximo do texto, em caracteres, de 30 a 65.535 (padrão: `30`). Isso não obriga cada mensagem a ter 30 caracteres.
-- `--text`: Texto não vazio para transferir, com até `--max-text` caracteres. Espaços são preservados e cada ponto de código Unicode conta como um caractere, sem normalização. Use aspas para manter espaços no argumento.
+- `--text`: Texto não vazio para transferir, com até `--max-text` caracteres. Use aspas para manter espaços no argumento.
+- `--fault`: Falha simulada no formato `TIPO:SEQ:OCORRÊNCIA:AÇÃO`. Pode ser repetida.
+- `--key`: Chave da cifra de César, de 1 a 25. Deve ser a mesma configurada no servidor.
 
 Se mudar a porta do servidor, informe a mesma porta ao cliente com `--port`. Para acessar um servidor em outra máquina, use `--host` seguido do IP correspondente.
+
+### 3. Simular erros e perdas
+
+Cada regra de `--fault` diz qual pacote falha e como:
+
+- `TIPO`: `DATA`, `ACK` ou `NAK`
+- `SEQ`: número de sequência do pacote
+- `OCORRÊNCIA`: a partir de 1. Para DATA, é a tentativa de envio; para ACK e NAK, é a chegada de número N daquela resposta.
+- `AÇÃO`: `perder` descarta o pacote; `corromper` inverte um bit para que o checksum falhe.
+
+A perda de DATA acontece antes do envio, e a de ACK e NAK acontece na chegada ao cliente. Assim, nada precisa ser configurado no servidor. Alguns exemplos:
+
+```bash
+# Perda de DATA 1: recuperação por timeout
+python src/client.py --mode batch --strategy sr --text "REDE LOCAL TESTE" --fault DATA:1:1:perder
+
+# Corrupção de DATA 1: o servidor responde com NAK e o cliente reenvia
+python src/client.py --mode batch --strategy gbn --text "REDE LOCAL TESTE" --fault DATA:1:1:corromper
+
+# Perda do último ACK: o servidor confirma a duplicata sem exibir o texto de novo
+python src/client.py --mode batch --strategy sr --text "REDE LOCAL" --fault ACK:2:1:perder
+
+# Todas as tentativas de DATA 0 perdidas: o cliente desiste com erro
+python src/client.py --text "A" --fault DATA:0:1:perder --fault DATA:0:2:perder --fault DATA:0:3:perder --fault DATA:0:4:perder
+```
+
+As saídas completas desses e de outros cenários estão em [docs/cenarios-cp3.md](docs/cenarios-cp3.md).
+
+### 4. Usar a cifra de César
+
+Inicie o servidor e o cliente com a mesma chave:
+
+```bash
+python src/server.py --key 3
+```
+
+```bash
+python src/client.py --text "REDE LOCAL" --key 3
+```
+
+O cliente cifra o texto antes de fragmentá-lo, então os pacotes carregam `UHGH ORFDO`. O servidor exibe o texto cifrado recebido e, em seguida, a mensagem decifrada.
 
 ---
 
 ## Exemplo de execução
 
-Com o servidor em execução, envie uma mensagem:
+Com o servidor em execução, envie uma mensagem perdendo o primeiro envio do DATA 1:
 
 ```bash
-python src/client.py --mode individual --text "REDE LOCAL"
+python src/client.py --mode individual --text "REDE LOCAL" --fault DATA:1:1:perder
 ```
-
-Depois do handshake, o cliente envia os três fragmentos e recebe suas confirmações:
 
 **Cliente:**
 
 ```
 [CLIENT] Pacotes DATA preparados: 3
-[CLIENT] DATA enviado (seq=0)
+[CLIENT] DATA enviado (seq=0, tentativa=1)
 [CLIENT] ACK recebido (seq=0, checksum=0x55FA)
-[CLIENT] DATA enviado (seq=1)
+[CLIENT] Janela avançou (base=1, window=1)
+[CLIENT] DATA enviado (seq=1, tentativa=1)
+[FAULT] perder DATA 1 (ocorrência 1)
+[CLIENT] Timeout de DATA 1
+[CLIENT] DATA retransmitido por timeout (seq=1, tentativa=2)
 [CLIENT] ACK recebido (seq=1, checksum=0x55F9)
-[CLIENT] DATA enviado (seq=2)
+[CLIENT] Janela avançou (base=2, window=1)
+[CLIENT] DATA enviado (seq=2, tentativa=1)
 [CLIENT] ACK recebido (seq=2, checksum=0x55F8)
+[CLIENT] Janela avançou (base=3, window=1)
 [CLIENT] Transferência concluída: todos os fragmentos confirmados
 ```
 
@@ -126,12 +185,15 @@ Depois do handshake, o cliente envia os três fragmentos e recebe suas confirma�
 
 ```
 [SERVER] DATA recebido (seq=0, LAST=0, LEN=4, checksum=0xBF6C)
+[SERVER] ACK 0 enviado
 [SERVER] DATA recebido (seq=1, LAST=0, LEN=4, checksum=0xE666)
+[SERVER] ACK 1 enviado
 [SERVER] DATA recebido (seq=2, LAST=1, LEN=2, checksum=0x13AB)
+[SERVER] ACK 2 enviado
 [SERVER] Mensagem reconstruída: REDE LOCAL
 ```
 
-O espaço entre as palavras faz parte do segundo fragmento e é preservado na reconstrução. O [exemplo de handshake do CP1](docs/exemplo-handshake.txt) continua disponível como registro daquela etapa.
+O servidor nunca vê o envio perdido. Ele recebe apenas a retransmissão, e o espaço entre as palavras é preservado na reconstrução. O [exemplo de handshake do CP1](docs/exemplo-handshake.txt) continua disponível como registro daquela etapa.
 
 ---
 
@@ -143,18 +205,16 @@ Para executar os testes com o módulo `unittest` da biblioteca padrão:
 python -m unittest discover -s tests -v
 ```
 
-Os testes usam valores esperados conhecidos e cobrem entradas pares e ímpares, transporte circular, checksum em seu campo, alteração de um bit e preservação dos bytes de entrada.
+Os testes de checksum usam valores esperados conhecidos e cobrem entradas pares e ímpares, transporte circular, checksum em seu campo e alteração de um bit. Os testes de pacotes conferem os bytes e deslocamentos de DATA, ACK e NAK, os limites de sequência e payload, UTF-8 e a rejeição de pacotes inválidos, com `ChecksumError` para checksum incorreto.
 
-Os testes de pacotes conferem os bytes e deslocamentos dos campos, as sequências de 0 a 16.383, os limites do payload, UTF-8 e a contagem de pontos de código sem normalização. Também verificam a rejeição de campos inválidos, pacotes truncados, bytes extras e checksum incorreto, além da compatibilidade dos pacotes de handshake.
+Os testes de recuperação usam um relógio simulado para verificar, sem esperas reais, o reenvio a partir da base em GBN, o reenvio individual em SR, o tratamento de NAK repetido, o limite de três retransmissões e o efeito de cada falha simulada. Os testes do servidor cobrem o envio de NAK, as respostas a duplicatas, o prazo de 25 segundos e a retenção da sessão concluída. Também há testes para as regras de `--fault` e para a cifra de César.
 
-Os testes de preparação cobrem sequências, `LAST`, payloads, checksum e reconstrução exata do texto, incluindo espaços, acentos, caracteres de quatro bytes em UTF-8 e os limites de `max_text`. Os testes unitários também conferem a validação antes da comunicação, janelas de 1 a 5, ACKs cumulativos e fora de ordem, recepção sem duplicatas e timeouts sem retransmissão.
+Os testes de integração usam processos e sockets UDP reais em localhost, com temporizadores reduzidos. Cobrem a reconstrução exata nos dois modos, GBN e SR com janelas de 1 a 5, recuperação de perdas e corrupções de DATA, ACK e NAK, a cifra de ponta a ponta e novas sessões após conclusão ou timeout. Essa parte da suíte precisa de permissão para abrir sockets locais.
 
-Os testes de integração usam processos e sockets UDP reais em localhost, com portas disponíveis escolhidas pelo sistema. Cobrem a reconstrução exata nos dois modos, GBN e SR com janelas de 1 a 5 e novas sessões após conclusão ou timeout. Testes com ACKs controlados verificam o preenchimento da janela antes da primeira espera e o envio dos fragmentos liberados, incluindo a retenção da base em SR quando há lacunas. Essa parte da suíte precisa de permissão para abrir sockets locais.
-
-Para executar somente os testes de pacotes:
+Para executar somente os testes de recuperação:
 
 ```bash
-python -m unittest discover -s tests -p "test_packets.py" -v
+python -m unittest discover -s tests -p "test_recovery.py" -v
 ```
 
 Para executar as verificações de montagem e leitura de `HELLO`, `HELLO_ACK` e `READY`:
@@ -162,5 +222,3 @@ Para executar as verificações de montagem e leitura de `HELLO`, `HELLO_ACK` e 
 ```bash
 python src/protocol.py
 ```
-
-As verificações de handshake cobrem os pacotes do CP1. Os testes de transferência cobrem os modos individual e batch no caminho sem recuperação por retransmissão.
