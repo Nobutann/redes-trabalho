@@ -12,6 +12,7 @@ class PacketType(IntEnum):
     READY = 0x03
     DATA = 0x04
     ACK = 0x05
+    NAK = 0x06
 
 
 class Mode(IntEnum):
@@ -28,11 +29,15 @@ class InvalidPacketError(ValueError):
     """Lançada quando o byte MAGIC não confere."""
 
 
+class ChecksumError(ValueError):
+    """Lançada quando um pacote bem formado falha na verificação do checksum."""
+
+
 HEADER_SIZE = 2
 HELLO_BODY_SIZE = 5
 HELLO_ACK_BODY_SIZE = 1
 DATA_HEADER_SIZE = 8
-ACK_SIZE = 6
+CONTROL_SIZE = 6
 MAX_SEQUENCE = 16383
 MAX_PAYLOAD_SIZE = 16
 
@@ -140,12 +145,19 @@ def prepare_data_packets(text: str, max_text: int) -> list[bytes]:
     return packets
 
 
-def build_ack(seq: int) -> bytes:
+def _build_control(pkt_type: PacketType, seq: int) -> bytes:
     _validate_sequence(seq)
-    header = bytes([MAGIC, PacketType.ACK]) + seq.to_bytes(2, byteorder="big")
-    packet = header + b"\x00\x00"
-    checksum = calculate_checksum(packet)
+    header = bytes([MAGIC, pkt_type]) + seq.to_bytes(2, byteorder="big")
+    checksum = calculate_checksum(header + b"\x00\x00")
     return header + checksum.to_bytes(2, byteorder="big")
+
+
+def build_ack(seq: int) -> bytes:
+    return _build_control(PacketType.ACK, seq)
+
+
+def build_nak(seq: int) -> bytes:
+    return _build_control(PacketType.NAK, seq)
 
 
 def parse_packet(data: bytes) -> dict:
@@ -201,7 +213,7 @@ def parse_packet(data: bytes) -> dict:
         if len(data) != DATA_HEADER_SIZE + length:
             raise ValueError("LEN de DATA não corresponde ao tamanho do payload recebido")
         if not verify_checksum(data):
-            raise ValueError("Checksum de DATA inválido")
+            raise ChecksumError("Checksum de DATA inválido")
 
         seq = int.from_bytes(data[2:4], byteorder="big")
         last = data[4]
@@ -216,11 +228,11 @@ def parse_packet(data: bytes) -> dict:
             "payload": payload,
         }
 
-    if pkt_type is PacketType.ACK:
-        if len(data) != ACK_SIZE:
-            raise ValueError(f"Pacote ACK deve ter exatamente {ACK_SIZE} bytes")
+    if pkt_type in (PacketType.ACK, PacketType.NAK):
+        if len(data) != CONTROL_SIZE:
+            raise ValueError(f"Pacote {pkt_type.name} deve ter exatamente {CONTROL_SIZE} bytes")
         if not verify_checksum(data):
-            raise ValueError("Checksum de ACK inválido")
+            raise ChecksumError(f"Checksum de {pkt_type.name} inválido")
 
         seq = int.from_bytes(data[2:4], byteorder="big")
         _validate_sequence(seq)

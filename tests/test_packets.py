@@ -1,6 +1,7 @@
 import unittest
 
 from src.protocol import (
+    ChecksumError,
     InvalidPacketError,
     Mode,
     PacketType,
@@ -9,6 +10,7 @@ from src.protocol import (
     build_data,
     build_hello,
     build_hello_ack,
+    build_nak,
     build_ready,
     calculate_checksum,
     parse_packet,
@@ -262,6 +264,31 @@ class AckPacketTests(unittest.TestCase):
                     parse_packet(packet)
 
 
+class NakPacketTests(unittest.TestCase):
+    def test_layout_and_parse(self):
+        packet = build_nak(seq=0x1234)
+        self.assertEqual(packet, bytes.fromhex("AA 06 12 34 43 C5"))
+        self.assertEqual(parse_packet(packet), {
+            "type": PacketType.NAK,
+            "seq": 0x1234,
+            "checksum": 0x43C5,
+        })
+
+    def test_changed_bit_raises_checksum_error(self):
+        for packet in (build_nak(1), build_ack(1), build_data(1, 1, b"A")):
+            with self.subTest(packet=packet):
+                corrupted = packet[:-1] + bytes([packet[-1] ^ 1])
+                with self.assertRaises(ChecksumError):
+                    parse_packet(corrupted)
+
+    def test_rejects_incorrect_length(self):
+        packet = build_nak(1)
+        for invalid in (packet[:-1], packet + b"\x00"):
+            with self.subTest(size=len(invalid)):
+                with self.assertRaisesRegex(ValueError, "NAK deve ter exatamente 6 bytes"):
+                    parse_packet(invalid)
+
+
 class PacketCompatibilityTests(unittest.TestCase):
     def test_window_boundaries(self):
         for window in range(1, 6):
@@ -333,7 +360,7 @@ class PacketCompatibilityTests(unittest.TestCase):
             (bytes.fromhex("AA 05 00 00 55 FA"), 4),
         ):
             with self.subTest(packet_type=packet[1]):
-                invalid = _with_checksum(packet[:1] + b"\x06" + packet[2:], checksum_offset)
+                invalid = _with_checksum(packet[:1] + b"\x07" + packet[2:], checksum_offset)
                 self.assertTrue(verify_checksum(invalid))
                 with self.assertRaisesRegex(ValueError, "Tipo de pacote desconhecido"):
                     parse_packet(invalid)
