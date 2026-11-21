@@ -4,9 +4,7 @@ Este projeto faz parte da disciplina de Infraestrutura de Comunicação. O objet
 
 A aplicação divide textos em fragmentos de até quatro caracteres e prepara pacotes com número de sequência, indicador de último fragmento e checksum. No modo individual, envia um fragmento por vez e aguarda seu ACK. Em batch, usa uma janela anunciada pelo servidor, com confirmações cumulativas em Go-Back-N ou individuais em Repetição Seletiva. Perdas e corrupções são recuperadas com temporizadores, NAK e retransmissões, e podem ser simuladas de forma determinística no cliente.
 
-**Estado atual:** CP3 concluído. O projeto cobre todas as características de transporte confiável pedidas no enunciado: soma de verificação, temporizador, número de sequência, reconhecimento positivo e negativo, janela e paralelismo. Os dois pontos extras também estão implementados: o checksum de 16 bits e a cifra de César, ambos feitos à mão.
-
-A [especificação do protocolo](docs/protocolo.md) reúne os formatos dos pacotes, os estados da sessão e as regras de confirmação e recuperação. Os [cenários de erros e perdas](docs/cenarios-cp3.md) mostram a saída real de cada situação tratada pelo protocolo.
+**Estado atual:** Checkpoint 3 concluído.
 
 ---
 
